@@ -7,6 +7,9 @@ import Foundation
 public struct WallspanState: Codable {
     public struct Snapshot: Codable {
         public let displayID: UInt32
+        /// Optional so snapshots written before this field existed still decode; `restore`
+        /// falls back to `displayID` for those.
+        public var uuid: String?
         public let path: String?
     }
 
