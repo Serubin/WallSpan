@@ -471,11 +471,37 @@ func cmdRestore() throws {
     guard let snaps = state.originalWallpaper, !snaps.isEmpty else {
         fail("no saved wallpaper to restore (wallspan has not applied anything yet)")
     }
-    try WallpaperApplier.restore(snaps)
-    for s in snaps { print("restored display \(s.displayID): \(s.path ?? "nil")") }
+    let restored = try WallpaperApplier.restore(snaps)
+    guard !restored.isEmpty else {
+        fail("none of the \(snaps.count) saved display(s) are attached; nothing restored")
+    }
+    for r in restored { print("restored \(r.display): \(r.path)") }
+    if restored.count < snaps.count {
+        print("\(snaps.count - restored.count) saved display(s) not attached; skipped")
+    }
 }
 
 // MARK: - cycle
+
+/// Command-line values that outrank the config file.
+///
+/// Re-applied on top of every reload rather than merged once at startup: `cycle` re-reads
+/// the file each tick, so a one-shot merge is overwritten by the first reload.
+struct CycleOverrides {
+    var playlistDirectory: String?
+    var recursive: Bool?
+    var shuffle: Bool?
+    var intervalSeconds: TimeInterval?
+
+    func applied(to cfg: CycleConfig) -> CycleConfig {
+        var out = cfg
+        if let d = playlistDirectory { out.playlistDirectory = d }
+        if let r = recursive { out.recursive = r }
+        if let s = shuffle { out.shuffle = s }
+        if let i = intervalSeconds { out.intervalSeconds = i }
+        return out
+    }
+}
 
 /// Held globally because CGDisplayRegisterReconfigurationCallback takes a C function
 /// pointer, which cannot capture context.
@@ -484,8 +510,7 @@ final class Cycler {
     var current: URL?
     var layout: PhysicalLayout
     var config: CycleConfig
-    /// Set only by an explicit --interval, which then wins over the config file.
-    let intervalOverride: TimeInterval?
+    let overrides: CycleOverrides
     var timer: Timer?
     var configWatch: Timer?
     var configMTime: Date?
@@ -497,13 +522,13 @@ final class Cycler {
     /// call `tick()`.
     var retryWork: DispatchWorkItem?
 
-    init(layout: PhysicalLayout, config: CycleConfig, intervalOverride: TimeInterval?) {
+    init(layout: PhysicalLayout, config: CycleConfig, overrides: CycleOverrides) {
         self.layout = layout
         self.config = config
-        self.intervalOverride = intervalOverride
+        self.overrides = overrides
     }
 
-    var interval: TimeInterval { intervalOverride ?? config.intervalSeconds }
+    var interval: TimeInterval { config.intervalSeconds }
 
     /// Polls the config file's mtime so `config set` is picked up independently of the
     /// interval — re-reading only per tick would mean waiting an hour to lower an hourly
@@ -522,7 +547,8 @@ final class Cycler {
     }
 
     func reloadConfigIfChanged() {
-        let fresh = ConfigStore.load()
+        // Overrides are re-applied here, so a command-line argument survives every reload.
+        let fresh = overrides.applied(to: ConfigStore.load())
         guard fresh != config else { return }
         let oldInterval = interval, oldDir = config.playlistDirectory, oldShuffle = config.shuffle
         config = fresh
@@ -533,8 +559,7 @@ final class Cycler {
                   + (fresh.playlistDirectory ?? "(unset)"))
             playlist = nil          // rebuilt on the next tick
         }
-        // An explicit --interval on the command line still wins over the file.
-        if intervalOverride == nil, interval != oldInterval {
+        if interval != oldInterval {
             print("[\(timestamp())] config changed: interval -> \(ConfigStore.formatInterval(interval))")
             scheduleTimer()
         }
@@ -547,11 +572,23 @@ final class Cycler {
         timer = t
     }
 
+    /// Re-ticks after a backoff. Every unusable-directory path needs this, or the run
+    /// stalls until the next scheduled tick.
+    func scheduleRetry() {
+        retryWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.tick() }
+        retryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay, execute: work)
+        retryDelay = min(retryDelay * 2, max(interval, 60))
+    }
+
     /// Builds the playlist, or returns nil if the directory is not currently usable.
     func ensurePlaylist() -> Playlist? {
         if let p = playlist { return p }
         guard let dir = config.directoryURL else {
-            print("[\(timestamp())] no playlist directory configured - run `wallspan config set --dir <path>`")
+            print("[\(timestamp())] no playlist directory configured - run "
+                  + "`wallspan config set --dir <path>`; retrying in \(Int(retryDelay))s")
+            scheduleRetry()
             return nil
         }
         do {
@@ -566,11 +603,7 @@ final class Cycler {
             return p
         } catch {
             print("[\(timestamp())] playlist unavailable (\(error)); retrying in \(Int(retryDelay))s")
-            retryWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.tick() }
-            retryWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay, execute: work)
-            retryDelay = min(retryDelay * 2, max(interval, 60))
+            scheduleRetry()
             return nil
         }
     }
@@ -590,14 +623,23 @@ final class Cycler {
         let position = "\(pl.index)/\(pl.order.count)"
         current = image
         print("[\(timestamp())] \(position)  \(image.lastPathComponent)")
+
+        // Snapshot BEFORE applying, and persist it before the desktop changes.
+        // `currentWallpapers()` reads the live desktop and `originalWallpaper` is
+        // write-once, so capturing it afterwards would record our own render and lose the
+        // real wallpaper permanently.
+        var state = StateStore.load()
+        if state.originalWallpaper == nil {
+            snapshotOriginalIfNeeded(&state)
+            try? StateStore.save(state)
+        }
+
         do {
             try applyOnce(image: image, layout: layout, dryRun: false, quiet: true)
         } catch {
             FileHandle.standardError.write("  failed: \(error)\n".data(using: .utf8)!)
         }
         // Persist even if applying failed, so a transient failure cannot replay the image.
-        var state = StateStore.load()
-        snapshotOriginalIfNeeded(&state)
         state.lastApplied = image.path
         pl.persist(into: &state)
         try? StateStore.save(state)
@@ -640,18 +682,20 @@ func reconfigCallback(_ display: CGDirectDisplayID, _ flags: CGDisplayChangeSumm
 
 func cmdCycle() throws {
     // Settings come from the config file so the LaunchAgent's ProgramArguments is just
-    // `wallspan cycle`. Explicit flags still win.
-    var config = ConfigStore.load()
-    if let p = args.positionals.first { config.playlistDirectory = expand(p).path }
-    if args.has("recursive") { config.recursive = true }
-    if args.has("sequential") { config.shuffle = false }
-
-    var override: TimeInterval?
+    // `wallspan cycle`. Explicit flags outrank the file for the whole run, not just the
+    // first tick - see CycleOverrides.
+    var overrides = CycleOverrides()
+    if let p = args.positionals.first { overrides.playlistDirectory = expand(p).path }
+    if args.has("recursive") { overrides.recursive = true }
+    if args.has("no-recursive") { overrides.recursive = false }
+    if args.has("sequential") { overrides.shuffle = false }
+    if args.has("shuffle") { overrides.shuffle = true }
     if let s = args.value("interval") {
         guard let i = parseInterval(s) else { fail("bad --interval: \(s)") }
-        override = i
+        overrides.intervalSeconds = i
     }
 
+    let config = overrides.applied(to: ConfigStore.load())
     guard config.playlistDirectory != nil else {
         fail("""
         no playlist directory. Either pass one:
@@ -662,13 +706,15 @@ func cmdCycle() throws {
     }
 
     let layout = try PhysicalLayoutStore.current()
-    let c = Cycler(layout: layout, config: config, intervalOverride: override)
+    let c = Cycler(layout: layout, config: config, overrides: overrides)
     cycler = c
 
     print("cycling \(config.playlistDirectory!)")
     print("interval \(ConfigStore.formatInterval(c.interval)), "
           + "\(config.shuffle ? "shuffled" : "sequential")"
-          + (override == nil ? "  (from \(ConfigStore.url.lastPathComponent); re-read each tick)" : "  (--interval overrides config)"))
+          + (overrides.intervalSeconds == nil
+             ? "  (from \(ConfigStore.url.lastPathComponent); re-read each tick)"
+             : "  (--interval overrides config)"))
     print("ctrl-c to stop; run `wallspan restore` to put your old wallpaper back\n")
 
     c.tick()
@@ -815,7 +861,8 @@ func usage() {
           Render per-display crops and set them as wallpaper. --dry-run writes the
           PNGs and prints their paths without changing anything.
 
-      wallspan cycle [directory] [--interval 15m] [--sequential] [--recursive]
+      wallspan cycle [directory] [--interval 15m] [--shuffle|--sequential]
+                     [--recursive|--no-recursive]
           Walk a folder on an interval. Re-renders automatically if you rearrange
           or unplug a display. Runs in the foreground. With no arguments it reads
           the config, and re-reads it every tick.

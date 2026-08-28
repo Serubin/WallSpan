@@ -63,7 +63,11 @@ public struct Playlist {
         if state?.playlistDirectory == directory.path,
            let saved, Set(saved.map(\.path)) == Set(files.map(\.path)) {
             self.order = saved
-            self.index = min(state?.playlistIndex ?? 0, saved.count - 1)
+            // Clamp into 0...count, not 0..<count: advance() persists the index *after*
+            // next(), so a completed pass legitimately saves `count`, and pulling that
+            // back to the last element would replay it and skip the reshuffle. The lower
+            // bound guards a hand-edited or truncated state.json.
+            self.index = min(max(state?.playlistIndex ?? 0, 0), saved.count)
         } else {
             self.order = shuffled ? files.shuffled() : files
             self.index = 0
