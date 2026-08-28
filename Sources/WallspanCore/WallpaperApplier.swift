@@ -46,12 +46,27 @@ public enum WallpaperApplier {
             .map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Encodes to a sibling temp file and swaps it in.
+    ///
+    /// Writing the final path directly leaves a truncated PNG if the process dies mid
+    /// encode, and `materialize` tests the cache by existence alone — so a partial file
+    /// would be served as a hit forever. With the swap, a file that exists is complete.
     public static func writePNG(_ image: CGImage, to url: URL) throws {
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
         guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.png.identifier as CFString, 1, nil
+            tmp as CFURL, UTType.png.identifier as CFString, 1, nil
         ) else { throw ApplyError.pngEncodeFailed(url) }
         CGImageDestinationAddImage(dest, image, nil)
         guard CGImageDestinationFinalize(dest) else { throw ApplyError.pngEncodeFailed(url) }
+
+        if FileManager.default.fileExists(atPath: url.path) {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        } else {
+            try FileManager.default.moveItem(at: tmp, to: url)
+        }
     }
 
     /// Returns per-display PNG locations, reusing the cache when possible. `render` is a
@@ -65,21 +80,71 @@ public enum WallpaperApplier {
         let dir = StateStore.renderDirectory.appendingPathComponent(key, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        let displays = layout.entries.map(\.display)
-        let expected = displays.map { dir.appendingPathComponent("screen_\($0.id).png") }
-        if expected.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) {
-            return zip(displays, expected).map {
+        let fm = FileManager.default
+        let expected = layout.entries.map { screenFile(in: dir, uuid: $0.placement.uuid) }
+        if expected.allSatisfy({ fm.fileExists(atPath: $0.path) }) {
+            touch(dir)
+            return zip(layout.entries.map(\.display), expected).map {
                 ApplyResult(display: $0, url: $1, cached: true)
             }
         }
 
         var results: [ApplyResult] = []
         for screen in try render() {
-            let url = dir.appendingPathComponent("screen_\(screen.display.id).png")
+            let url = screenFile(in: dir, uuid: screen.placement.uuid)
             try writePNG(screen.image, to: url)
             results.append(ApplyResult(display: screen.display, url: url, cached: false))
         }
+
+        // Drop anything this set still holds that the current layout does not name -
+        // ID-named files from before the UUID switch, or a display since detached.
+        let keep = Set(results.map(\.url.lastPathComponent))
+        for f in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where !keep.contains(f) {
+            try? fm.removeItem(at: dir.appendingPathComponent(f))
+        }
+
+        touch(dir)
+        prune()
         return results
+    }
+
+    /// Per-display file name, keyed by UUID rather than `CGDirectDisplayID`.
+    ///
+    /// The render key hashes the UUID-based physical fingerprint, so ID-named files miss
+    /// after every reassignment and re-render a second set beside the unreachable ones.
+    static func screenFile(in dir: URL, uuid: String) -> URL {
+        dir.appendingPathComponent("screen_\(uuid).png")
+    }
+
+    /// How many render sets to keep. Without a cap, a cycling agent over a large folder
+    /// grows the cache forever - one directory of multi-megabyte PNGs per image.
+    static let cacheLimit = 50
+
+    /// Marks a render set as most recently used, so eviction is LRU rather than
+    /// first-rendered-first-out.
+    static func touch(_ dir: URL) {
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()], ofItemAtPath: dir.path
+        )
+    }
+
+    /// Evicts the least recently used render sets beyond `cacheLimit`. The set just
+    /// touched is always the newest, so the wallpaper in use is never the one deleted.
+    static func prune(limit: Int = cacheLimit) {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: StateStore.renderDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ), dirs.count > limit else { return }
+
+        let newestFirst = dirs.map { url -> (URL, Date) in
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            return (url, mtime)
+        }.sorted { $0.1 > $1.1 }
+
+        for (url, _) in newestFirst.dropFirst(limit) { try? fm.removeItem(at: url) }
     }
 
     /// Applies one image per display, then verifies macOS actually took it:
@@ -135,25 +200,40 @@ public enum WallpaperApplier {
             else { return nil }
             return WallspanState.Snapshot(
                 displayID: n.uint32Value,
+                uuid: PhysicalLayoutStore.uuid(for: n.uint32Value),
                 path: NSWorkspace.shared.desktopImageURL(for: screen)?.path
             )
         }
     }
 
-    /// Puts back a previously captured snapshot.
-    public static func restore(_ snapshots: [WallspanState.Snapshot]) throws {
+    /// Puts back a previously captured snapshot, returning what it actually restored.
+    ///
+    /// Matches on UUID: `CGDirectDisplayID` is reassigned across reboots and reconnects, so
+    /// keying on it puts wallpapers back on the wrong screens after a swap. Snapshots
+    /// written before `uuid` was recorded fall back to it.
+    @discardableResult
+    public static func restore(
+        _ snapshots: [WallspanState.Snapshot]
+    ) throws -> [(display: String, path: String)] {
+        var restored: [(display: String, path: String)] = []
         for screen in NSScreen.screens {
-            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-                  let path = snapshots.first(where: { $0.displayID == n.uint32Value })?.path
+            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
             else { continue }
+            let id = n.uint32Value
+            let uuid = PhysicalLayoutStore.uuid(for: id)
+            let match = snapshots.first { $0.uuid != nil && $0.uuid == uuid }
+                ?? snapshots.first { $0.uuid == nil && $0.displayID == id }
+            guard let path = match?.path else { continue }
             do {
                 try NSWorkspace.shared.setDesktopImageURL(URL(fileURLWithPath: path), for: screen, options: [
                     .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue,
                     .allowClipping: true,
                 ])
+                restored.append((screen.localizedName, path))
             } catch {
                 throw ApplyError.setFailed(display: screen.localizedName, underlying: error)
             }
         }
+        return restored
     }
 }
