@@ -95,6 +95,12 @@ public struct PhysicalLayout {
         return min(1.0, covered / total)
     }
 
+    /// Largest configured gap, in mm. Above a fraction of one, a spanned image is
+    /// discontinuous across the seam by design.
+    public var maxGapMM: CGFloat {
+        horizontalGaps.map { abs($0.gapMM) }.max() ?? 0
+    }
+
     /// Gap to each panel's nearest right-hand neighbour, for `layout show`.
     ///
     /// Nearest only: every ordered pair also matches panels with a third between them,

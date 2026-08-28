@@ -197,48 +197,6 @@ func cmdPreview() throws {
     print("bright regions are what your panels show; dimmed regions are bezel gaps and dead space")
 }
 
-func cmdVerifySeam() throws {
-    let layout = try PhysicalLayoutStore.current()
-    guard SeamVerifier.maxGapMM(layout) < 0.05 else {
-        fail("""
-        verify-seam assumes panels are edge-to-edge, but a bezel gap of \
-        \(String(format: "%.1f", SeamVerifier.maxGapMM(layout)))mm is configured.
-               A calibrated seam is discontinuous by design, so this check no longer means
-               anything. Use `wallspan verify-mapping` instead.
-        """)
-    }
-    let targets: [URL]
-    if args.positionals.isEmpty {
-        fail("usage: wallspan verify-seam <image|directory>")
-    }
-    let first = expand(args.positionals[0])
-    var isDir: ObjCBool = false
-    FileManager.default.fileExists(atPath: first.path, isDirectory: &isDir)
-    targets = isDir.boolValue
-        ? try Playlist.scan(first, recursive: args.has("recursive"))
-        : args.positionals.map(expand)
-
-    var failures = 0
-    for image in targets {
-        let (source, rendered) = try renderSpan(image: image, layout: layout)
-        let reports = SeamVerifier.verify(rendered: rendered, layout: layout)
-        if reports.isEmpty {
-            print("\(image.lastPathComponent): no horizontally adjacent display pair to check")
-            continue
-        }
-        for r in reports {
-            let mark = r.passed ? "PASS" : "FAIL"
-            if !r.passed { failures += 1 }
-            let name = image.lastPathComponent.padding(toLength: 42, withPad: " ", startingAt: 0)
-            print(String(format: "%@ %@  join %7.3f  interior %7.3f  ratio %6.3f",
-                         name, mark, r.joinGradient, r.interiorGradient, r.ratio))
-        }
-        _ = source
-    }
-    if failures > 0 { fail("\(failures) seam check(s) failed") }
-    print("\nall seam checks passed")
-}
-
 // MARK: - physical layout / calibration
 
 func cmdLayout() throws {
@@ -448,7 +406,7 @@ func cmdVerifyMapping() throws {
     }
     if failures > 0 { fail("\(failures) mapping check(s) failed") }
     print("\nall mapping checks passed"
-          + (SeamVerifier.maxGapMM(layout) >= 0.05
+          + (layout.maxGapMM >= 0.05
              ? " (with a calibrated bezel gap - this check stays valid there)" : ""))
 }
 
@@ -909,10 +867,6 @@ func usage() {
       wallspan selftest
           Offset sweep proving the geometry. Edge-to-edge layouts only.
 
-      wallspan verify-seam <image|directory> [--recursive]
-          Per-image continuity sanity check. Edge-to-edge layouts only, and weak
-          on near-flat images by nature.
-
       wallspan restore
           Put back whatever wallpaper you had before wallspan first ran.
     """)
@@ -924,7 +878,6 @@ do {
     case "apply":       try cmdApply()
     case "preview":     try cmdPreview()
     case "cycle":       try cmdCycle()
-    case "verify-seam": try cmdVerifySeam()
     case "verify-mapping": try cmdVerifyMapping()
     case "selftest":    try cmdSelfTest()
     case "layout":      try cmdLayout()
