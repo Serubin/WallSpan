@@ -298,7 +298,8 @@ func cmdInfo() throws {
 /// rather than parse a version string. Kept beside the switch it describes.
 let subcommands = [
     "info", "apply", "preview", "cycle", "verify-mapping", "selftest",
-    "layout", "calibrate", "config", "agent", "restore", "version", "help",
+    "layout", "calibrate", "config", "agent", "restore", "status", "next",
+    "pause", "resume", "version", "help",
 ]
 
 func cmdVersion() {
@@ -745,8 +746,24 @@ final class Cycler {
         let fresh = overrides.applied(to: ConfigStore.load())
         guard fresh != config else { return }
         let oldInterval = interval, oldDir = config.playlistDirectory, oldShuffle = config.shuffle
+        let wasPaused = config.paused
         config = fresh
 
+        if fresh.paused != wasPaused {
+            print("[\(timestamp())] config changed: \(fresh.paused ? "paused" : "resumed")")
+            // Resuming waits for the next tick otherwise, which on an hourly interval means
+            // an hour of looking broken. Restart the clock from now and change immediately.
+            if !fresh.paused {
+                scheduleTimer()
+                // Cancelled by any advance that gets there first: pressing Resume and then
+                // Next inside the config-watch window would otherwise queue this behind a
+                // manual advance and consume two playlist entries for one intended change.
+                resumeTick?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.tick() }
+                resumeTick = work
+                DispatchQueue.main.async(execute: work)
+            }
+        }
         if fresh.playlistDirectory != oldDir || fresh.shuffle != oldShuffle
             || fresh.recursive != playlist?.recursiveScan {
             print("[\(timestamp())] config changed: playlist -> "
@@ -796,6 +813,9 @@ final class Cycler {
             return p
         } catch {
             print("[\(timestamp())] playlist unavailable (\(error)); retrying in \(Int(retryDelay))s")
+            var status = StatusStore.load()
+            status.lastError = "\(error)"
+            StatusStore.save(status)
             scheduleRetry()
             return nil
         }
@@ -804,19 +824,28 @@ final class Cycler {
     /// The cycler's only route to `applyOnce`, so `applying` cannot be bypassed.
     /// Saves and restores rather than clearing, so a caller already holding the flag
     /// (`advance`) still holds it when this returns.
-    func apply(_ image: URL, layout: PhysicalLayout) {
+    /// Returns the failure, if any, so the caller can put it in `status.json` — a front-end
+    /// has no other way to see it, and the agent cannot raise a prompt.
+    @discardableResult
+    func apply(_ image: URL, layout: PhysicalLayout) -> String? {
         let wasApplying = applying
         applying = true
         defer { applying = wasApplying }
         do {
             try applyOnce(image: image, layout: layout, dryRun: false, quiet: true)
+            return nil
         } catch {
             FileHandle.standardError.write("  failed: \(error)\n".data(using: .utf8)!)
+            return "\(error)"
         }
     }
 
     /// Re-runs a tick that landed mid-apply. Single-flight, like `retryWork`.
     var deferredTick: DispatchWorkItem?
+
+    /// The immediate change a resume triggers. Single-flight and cancelled by any advance,
+    /// so it cannot stack with a manual `next`.
+    var resumeTick: DispatchWorkItem?
 
     func tick() {
         // Guarded here rather than in advance(): draining the run loop lets the tick Timer
@@ -838,12 +867,35 @@ final class Cycler {
             return
         }
         reloadConfigIfChanged()
+        // After the reload, so a resume written to the config takes effect on this tick
+        // rather than the one after it.
+        guard !config.paused else { return }
         guard ensurePlaylist() != nil else { return }
+        advance()
+    }
+
+    /// What `wallspan next` triggers: change now, and stay paused if we were.
+    ///
+    /// Pause governs the *schedule*, not manual control — a front-end offering both a pause
+    /// switch and a Next button would otherwise have a Next that silently does nothing
+    /// whenever the switch is on, which reads as a broken button rather than a policy.
+    func advanceNow() {
+        guard !applying else {
+            print("[\(timestamp())] next ignored: an apply is already running")
+            return
+        }
+        reloadConfigIfChanged()
+        guard ensurePlaylist() != nil else { return }
+        // Restarting the interval is only meaningful when one is running.
+        if !config.paused { scheduleTimer() }
         advance()
     }
 
     func advance() {
         guard playlist != nil else { return }
+        // Whatever route got here satisfies a pending resume-triggered tick.
+        resumeTick?.cancel()
+        resumeTick = nil
         // Held across the whole of advance(), not just the apply: the playlist entry is
         // consumed here, and consuming it must be inside the same guarded window that the
         // apply is, or a re-entrant tick could take a second entry.
@@ -870,7 +922,21 @@ final class Cycler {
             try? StateStore.save(state)
         }
 
-        apply(image, layout: layout)
+        let failure = apply(image, layout: layout)
+        var status = StatusStore.load()
+        status.position = position
+        status.intervalSeconds = interval
+        if let failure {
+            // The desktop still shows whatever last succeeded, so currentImage and
+            // appliedAt keep pointing at that rather than at the image that failed.
+            status.lastError = failure
+        } else {
+            status.currentImage = image.path
+            status.appliedAt = Date()
+            status.lastError = nil
+        }
+        StatusStore.save(status)
+
         // Reload rather than reusing the copy from before the apply: the run loop turned
         // in between, so that copy may be stale.
         var after = StateStore.load()
@@ -1020,7 +1086,21 @@ func cmdCycle() throws {
     sigint.resume()
     signal(SIGINT, SIG_IGN)
 
-    // Both service the same RunLoop.main sources; only AppKit's delivers the notification.
+    // `wallspan next` advances the running cycler. A signal, because "change now" has
+    // nothing durable worth persisting — unlike pause, which is config precisely so it
+    // survives a respawn.
+    let sigusr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    sigusr1.setEventHandler {
+        print("[\(c.timestamp())] next requested")
+        c.advanceNow()
+    }
+    sigusr1.resume()
+    // Mandatory: SIGUSR1 terminates by default and the dispatch source does not change
+    // that, so without this `next` kills the agent.
+    signal(SIGUSR1, SIG_IGN)
+
+    // Both service the same RunLoop.main sources — including the signal above; only
+    // AppKit's delivers the Space-change notification.
     if followsSpaces { NSApplication.shared.run() } else { RunLoop.main.run() }
 }
 
@@ -1054,6 +1134,92 @@ func applyConfigFlags(to cfg: inout CycleConfig) -> Bool {
 func configReport(_ cfg: CycleConfig) -> Contract.ConfigReport {
     let count = cfg.directoryURL.flatMap { try? Playlist.scan($0, recursive: cfg.recursive).count }
     return Contract.ConfigReport(cfg, imageCount: count)
+}
+
+// MARK: - status + running-cycler control
+
+/// "in 8m" / "7m ago" / "just now". Coarse on purpose: a status line refreshed on a timer
+/// that claims "in 7m 43s" is wrong a second later.
+func relative(_ date: Date, from now: Date = Date()) -> String {
+    let d = date.timeIntervalSince(now)
+    let mag = abs(d)
+    guard mag >= 45 else { return "just now" }
+    let text = mag < 3600
+        ? "\(Int((mag / 60).rounded()))m"
+        : String(format: "%.1fh", mag / 3600)
+    return d < 0 ? "\(text) ago" : "in \(text)"
+}
+
+func cmdStatus() throws {
+    let cfg = ConfigStore.load()
+    let report = Contract.StatusReport(
+        config: cfg, status: StatusStore.load(),
+        imageCount: cfg.directoryURL.flatMap { try? Playlist.scan($0, recursive: cfg.recursive).count },
+        holder: InstanceLock.holder()
+    )
+    if jsonMode { emit(report, as: "status") }
+
+    let pid = report.pid.map { " (pid \($0))" } ?? ""
+    print("cycling   : \(report.running ? "yes\(pid)" : "no")")
+    print("paused    : \(report.paused ? "yes" : "no")")
+    print("interval  : \(ConfigStore.formatInterval(report.intervalSeconds))")
+    if let dir = report.playlistDirectory {
+        // nil count means the scan failed, which is a different problem from an empty
+        // folder — and saying "unreadable" for a directory nobody set would be nonsense.
+        print("directory : \(dir)  (\(report.imageCount.map { "\($0) images" } ?? "unreadable"))")
+    } else {
+        print("directory : (not set)")
+    }
+    if let image = report.currentImage {
+        let pos = report.position.map { "  \($0)" } ?? ""
+        print("current   : \(URL(fileURLWithPath: image).lastPathComponent)\(pos)")
+    }
+    if let at = report.appliedAt { print("applied   : \(relative(at))") }
+    if let next = report.nextAt { print("next      : \(relative(next))") }
+    if let err = report.lastError { print("last error: \(err)") }
+    if !report.running {
+        print("\nnothing is cycling. `wallspan agent install` runs it in the background,")
+        print("or `wallspan cycle <dir>` in the foreground.")
+    }
+}
+
+/// Writes `paused` and lets the running agent notice, rather than signalling it: the agent
+/// re-reads the config within five seconds, and unlike a signal the setting survives the
+/// `KeepAlive` respawn that a crash or a logout would cause.
+func cmdPause(_ paused: Bool) throws {
+    var cfg = ConfigStore.load()
+    cfg.paused = paused
+    try ConfigStore.save(cfg)
+    if jsonMode { emit(configReport(cfg), as: "config") }
+
+    print(paused ? "paused" : "resumed")
+    if InstanceLock.holder() != nil {
+        print(paused
+              ? "the running cycler stops at its next check (within 5s)"
+              : "the running cycler changes the wallpaper within 5s")
+    } else {
+        print("nothing is cycling right now; this takes effect when it starts")
+    }
+}
+
+func cmdNext() throws {
+    guard let pid = InstanceLock.holder() else {
+        fail("""
+        nothing is cycling, so there is nothing to advance.
+               `wallspan agent install` runs it in the background.
+        """, code: .agentNotRunning)
+    }
+    // A held lock with an unreadable pid: the cycler is alive but cannot be addressed.
+    guard pid > 0 else {
+        fail("a cycler holds \(InstanceLock.defaultPath.path) but did not record its pid",
+             code: .internalError)
+    }
+    guard kill(pid, SIGUSR1) == 0 else {
+        fail("could not signal pid \(pid): \(String(cString: strerror(errno)))",
+             code: .internalError)
+    }
+    if jsonMode { emit(Contract.SignalReport(pid: pid, signal: "SIGUSR1"), as: "next") }
+    print("asked pid \(pid) to change now")
 }
 
 func cmdConfig() throws {
@@ -1170,6 +1336,20 @@ func usage() {
           or unplug a display. Runs in the foreground. With no arguments it reads
           the config, and re-reads it every tick.
 
+    DRIVING A RUNNING CYCLER
+      wallspan status
+          What is on screen, whether anything is cycling, and when the next
+          change is due.
+
+      wallspan next
+          Change now. Works while paused, and leaves it paused - pausing stops
+          the schedule, not the button.
+
+      wallspan pause
+      wallspan resume
+          A setting rather than a signal, so it survives a reboot and the agent
+          restarting. A running agent notices within a few seconds.
+
     RUNNING IT UNATTENDED
       wallspan config set --dir ~/Pictures/Backgrounds --interval 15m
       wallspan config show
@@ -1235,7 +1415,8 @@ func usage() {
 /// Subcommands with a defined `--json` payload. Everything else rejects the flag rather
 /// than emitting prose a caller cannot tell from a crash.
 let jsonCapable: Set<String> = [
-    "info", "apply", "restore", "layout", "config", "agent", "version", "calibrate",
+    "info", "apply", "restore", "layout", "config", "agent",
+    "status", "next", "pause", "resume", "version", "calibrate",
 ]
 
 if jsonMode, !jsonCapable.contains(args.subcommand) {
@@ -1256,6 +1437,10 @@ do {
     case "config":      try cmdConfig()
     case "agent":       try cmdAgent()
     case "restore":     try cmdRestore()
+    case "status":      try cmdStatus()
+    case "next":        try cmdNext()
+    case "pause":       try cmdPause(true)
+    case "resume":      try cmdPause(false)
     case "version", "--version": cmdVersion()
     case "help", "--help", "-h": usage()
     default:

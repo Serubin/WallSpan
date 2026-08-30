@@ -151,6 +151,7 @@ extension Contract {
         public var intervalSeconds: Double
         public var shuffle: Bool
         public var recursive: Bool
+        public var paused: Bool
         /// Decodable images found in the directory now, or nil when it cannot be read —
         /// the two states a front-end must distinguish before blaming an empty folder.
         public var imageCount: Int?
@@ -163,8 +164,62 @@ extension Contract {
             intervalSeconds = cfg.intervalSeconds
             shuffle = cfg.shuffle
             recursive = cfg.recursive
+            paused = cfg.paused
             self.imageCount = imageCount
             configPath = ConfigStore.url.path
+        }
+    }
+
+    /// Composed from three sources — what the cycler last did, what it is meant to do, and
+    /// whether anything is doing it. The file alone would show a countdown for a dead cycler.
+    public struct StatusReport: Codable {
+        /// Something holds the cycle lock — the LaunchAgent or a foreground `cycle`.
+        public var running: Bool
+        public var pid: Int?
+        public var paused: Bool
+        public var intervalSeconds: Double
+        public var playlistDirectory: String?
+        public var imageCount: Int?
+        public var currentImage: String?
+        public var appliedAt: Date?
+        /// When the next change is due. Computed here, not in the caller: the arithmetic is
+        /// the CLI's business, and it is nil precisely when a countdown would be a lie —
+        /// nothing running, paused, or nothing applied yet.
+        public var nextAt: Date?
+        public var position: String?
+        public var lastError: String?
+
+        public init(config: CycleConfig, status: CycleStatus, imageCount: Int?, holder: pid_t?) {
+            running = holder != nil
+            pid = holder.flatMap { $0 > 0 ? Int($0) : nil }
+            paused = config.paused
+            // A running cycler's own figure wins, because `cycle --interval 10m` overrides
+            // the file and the config would then describe a schedule nothing is following.
+            // Stale once it exits, so fall back to the config the next run will read.
+            let effective = (running ? status.intervalSeconds : nil) ?? config.intervalSeconds
+            intervalSeconds = effective
+            playlistDirectory = config.playlistDirectory
+            self.imageCount = imageCount
+            currentImage = status.currentImage
+            appliedAt = status.appliedAt
+            nextAt = (running && !config.paused)
+                ? status.appliedAt?.addingTimeInterval(effective)
+                : nil
+            position = status.position
+            lastError = status.lastError
+        }
+    }
+
+    /// Acknowledges a signal sent to the running cycler. Deliberately not a status: the
+    /// effect is asynchronous, so reporting state here would report the state *before* the
+    /// change. A caller that wants the outcome polls `status`.
+    public struct SignalReport: Codable {
+        public var pid: Int
+        public var signal: String
+
+        public init(pid: pid_t, signal: String) {
+            self.pid = Int(pid)
+            self.signal = signal
         }
     }
 
