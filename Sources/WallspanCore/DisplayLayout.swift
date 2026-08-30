@@ -2,7 +2,14 @@
 // Copyright (C) 2026 Solomon <serubin@serubin.net>
 
 import AppKit
-import CryptoKit
+
+extension NSScreen {
+    /// The `CGDirectDisplayID` behind this screen. Optional, not 0: 0 looks valid, so
+    /// substituting it defers an unidentifiable screen's failure downstream.
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
 
 /// One physical display in the global (virtual desktop) coordinate space. `frame` is y-up
 /// points, as `NSScreen.frame` reports it; a rotated panel already reports rotated dims.
@@ -39,10 +46,10 @@ public struct Layout {
 
     /// Reads the arrangement macOS already knows from System Settings > Displays.
     public static func current() throws -> Layout {
-        let infos = NSScreen.screens.map { screen -> DisplayInfo in
-            let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        let infos = NSScreen.screens.compactMap { screen -> DisplayInfo? in
+            guard let id = screen.displayID else { return nil }
             return DisplayInfo(
-                id: num?.uint32Value ?? 0,
+                id: id,
                 name: screen.localizedName,
                 frame: screen.frame,
                 scale: screen.backingScaleFactor
@@ -55,10 +62,9 @@ public struct Layout {
     /// against the highest backing scale rather than per-screen.
     public var maxScale: CGFloat { displays.map(\.scale).max() ?? 1 }
 
-    /// Fraction of the union rect covered by a display; the rest is never shown.
-    ///
-    /// Sums per-display areas, which would over-count on overlap — `NSScreen.screens`
-    /// reports a mirrored set as one screen, so that is contrived; clamped for safety.
+    /// Fraction of the union rect covered by a display; the rest is never shown. Sums
+    /// per-display areas, which would over-count on overlap — but `NSScreen.screens`
+    /// reports a mirrored set as one screen. Clamped for safety.
     public var coverage: Double {
         let covered = displays.reduce(0.0) { $0 + Double($1.frame.width * $1.frame.height) }
         let total = Double(union.width * union.height)
@@ -73,8 +79,7 @@ public struct Layout {
             .map { "\($0.id):\($0.frame.minX),\($0.frame.minY),\($0.frame.width),\($0.frame.height)@\($0.scale)" }
             .sorted()
             .joined(separator: "|")
-        let digest = SHA256.hash(data: Data(canonical.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return sha256Hex(canonical)
     }
 }
 

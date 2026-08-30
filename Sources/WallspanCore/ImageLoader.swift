@@ -38,10 +38,9 @@ public enum ImageLoader {
         return decodable.contains { type.conforms(to: UTType($0) ?? .data) }
     }
 
-    /// Loads `url` at the smallest resolution that still fully covers `target`.
-    ///
-    /// Dimensions come from metadata (no decode) so ImageIO can downsample *during*
-    /// decode: a 191 MP source is ~765 MB as RGBA8, ~95% of it discarded by the crop.
+    /// Loads `url` at the smallest resolution that still fully covers `target`. Dimensions
+    /// come from metadata (no decode) so ImageIO downsamples *during* decode: a 191 MP
+    /// source is ~765 MB as RGBA8, ~95% of it discarded by the crop.
     public static func load(_ url: URL, covering target: CGSize) throws -> SourceImage {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ImageLoadError.cannotOpen(url)

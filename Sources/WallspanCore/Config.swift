@@ -33,19 +33,10 @@ public enum ConfigStore {
         StateStore.supportDirectory.appendingPathComponent("config.json")
     }
 
-    public static func load() -> CycleConfig {
-        guard let data = try? Data(contentsOf: url),
-              let cfg = try? JSONDecoder().decode(CycleConfig.self, from: data)
-        else { return CycleConfig() }
-        return cfg
-    }
+    static let file = JSONFile<CycleConfig>(url: ConfigStore.url)
 
-    public static func save(_ cfg: CycleConfig) throws {
-        try StateStore.ensureDirectories()
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(cfg).write(to: url, options: .atomic)
-    }
+    public static func load() -> CycleConfig { file.load(default: CycleConfig()) }
+    public static func save(_ cfg: CycleConfig) throws { try file.save(cfg) }
 
     public static func describe(_ cfg: CycleConfig) -> String {
         var out = "cycle configuration (\(url.path))\n\n"

@@ -3,10 +3,9 @@
 
 import Foundation
 
-/// A directory of wallpapers walked in shuffled or sequential order.
-///
-/// Shuffle is a bag — shuffle the list, consume to exhaustion, reshuffle — so every image
-/// appears once per pass instead of clumping the way independent draws would.
+/// A directory of wallpapers walked in shuffled or sequential order. Shuffle is a bag —
+/// shuffle the list, consume to exhaustion, reshuffle — so every image appears once per
+/// pass instead of clumping the way independent draws would.
 public struct Playlist {
     public let directory: URL
     public private(set) var order: [URL]
@@ -63,10 +62,9 @@ public struct Playlist {
         if state?.playlistDirectory == directory.path,
            let saved, Set(saved.map(\.path)) == Set(files.map(\.path)) {
             self.order = saved
-            // Clamp into 0...count, not 0..<count: advance() persists the index *after*
-            // next(), so a completed pass legitimately saves `count`, and pulling that
-            // back to the last element would replay it and skip the reshuffle. The lower
-            // bound guards a hand-edited or truncated state.json.
+            // 0...count, not 0..<count: advance() persists after next(), so a completed
+            // pass saves `count`; clamping down would replay the last image and skip the
+            // reshuffle. The lower bound guards a hand-edited state.json.
             self.index = min(max(state?.playlistIndex ?? 0, 0), saved.count)
         } else {
             self.order = shuffled ? files.shuffled() : files

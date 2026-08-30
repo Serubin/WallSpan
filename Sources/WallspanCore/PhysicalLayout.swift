@@ -2,14 +2,11 @@
 // Copyright (C) 2026 Solomon <serubin@serubin.net>
 
 import AppKit
-import CryptoKit
 
-/// Where one panel's *active area* sits in the shared physical plane, in millimetres.
-/// Origin is bottom-left, y-up, as everywhere else here.
-///
-/// `sizeMM` is seeded from `CGDisplayScreenSize` but meant to be overridden: EDID
-/// dimensions are frequently wrong. An LG here reports 801.6 x 329.5 mm for a 3440x1440
-/// panel — non-square pixels (4.291 vs 4.370 px/mm) that a 34" ultrawide does not have.
+/// Where one panel's *active area* sits in the shared physical plane, in millimetres;
+/// origin bottom-left, y-up. `sizeMM` is seeded from `CGDisplayScreenSize` but meant to be
+/// overridden: EDID is often wrong — an LG here reports 801.6 x 329.5 mm for a 3440x1440
+/// panel, non-square pixels a 34" ultrawide does not have.
 public struct Placement: Codable, Equatable {
     public var uuid: String
     public var name: String
@@ -80,8 +77,7 @@ public struct PhysicalLayout {
             }
             .sorted()
             .joined(separator: "|")
-        return SHA256.hash(data: Data(canonical.utf8))
-            .map { String(format: "%02x", $0) }.joined()
+        return sha256Hex(canonical)
     }
 
     /// Fraction of the physical union covered by a panel. Lower than logical coverage once
@@ -101,11 +97,9 @@ public struct PhysicalLayout {
         horizontalGaps.map { abs($0.gapMM) }.max() ?? 0
     }
 
-    /// Gap to each panel's nearest right-hand neighbour, for `layout show`.
-    ///
-    /// Nearest only: every ordered pair also matches panels with a third between them,
-    /// reporting a whole panel's width as a "gap" — which breaks any caller that
-    /// maximises over the result.
+    /// Gap to each panel's nearest right-hand neighbour, for `layout show`. Nearest only:
+    /// every ordered pair also matches panels with a third between them, reporting a whole
+    /// panel's width as a gap and inflating `maxGapMM`.
     public var horizontalGaps: [(left: String, right: String, gapMM: CGFloat)] {
         entries.compactMap { a in
             let ar = a.placement.rectMM
@@ -141,29 +135,16 @@ public enum PhysicalLayoutStore {
         return mm
     }
 
-    public static func load() -> LayoutConfig {
-        guard let data = try? Data(contentsOf: configURL),
-              let cfg = try? JSONDecoder().decode(LayoutConfig.self, from: data)
-        else { return LayoutConfig() }
-        return cfg
-    }
+    static let file = JSONFile<LayoutConfig>(url: PhysicalLayoutStore.configURL)
 
-    public static func save(_ cfg: LayoutConfig) throws {
-        try StateStore.ensureDirectories()
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(cfg).write(to: configURL, options: .atomic)
-    }
+    public static func load() -> LayoutConfig { file.load(default: LayoutConfig()) }
+    public static func save(_ cfg: LayoutConfig) throws { try file.save(cfg) }
 
-    /// Derives placements that reproduce the current arrangement, so seeding is a no-op
-    /// and calibration starts from a known baseline.
+    /// Derives placements that reproduce the current arrangement, so seeding is a no-op.
     ///
-    /// Horizontally: edge-to-edge in the arrangement's left-to-right order, so the gap is
-    /// exactly 0 however logical widths relate to physical ones.
-    ///
+    /// Horizontally: edge-to-edge in left-to-right order, so the gap is exactly 0.
     /// Vertically: the exact inverse of `DisplayArranger.plan`, by fixed-point iteration —
-    /// `plan` matches physical heights using each panel's own density, so there is no
-    /// closed form. Convergence is geometric; a handful of rounds reaches float precision.
+    /// `plan` matches physical heights per-panel density, so there is no closed form.
     public static func seed(from layout: Layout) throws -> LayoutConfig {
         guard !layout.displays.isEmpty else { throw PhysicalLayoutError.noScreens }
 
@@ -185,10 +166,8 @@ public enum PhysicalLayoutStore {
         return cfg
     }
 
-    /// Refines placement y until `plan` would leave the arrangement untouched.
-    ///
-    /// `only`, when given, limits which placements may move, so a newly attached panel can
-    /// be solved without disturbing calibrated ones.
+    /// Refines placement y until `plan` would leave the arrangement untouched. `only`
+    /// limits which placements may move, so a newcomer solves without disturbing others.
     static func refineVertical(
         _ cfg: inout LayoutConfig, from layout: Layout, only: Set<String>? = nil
     ) {
@@ -213,13 +192,11 @@ public enum PhysicalLayoutStore {
         }
     }
 
-    /// Places a newly attached display alongside the placements already calibrated.
+    /// Places a newly attached display alongside the calibrated ones.
     ///
-    /// Re-seeding would repack every panel from the origin using raw EDID sizes, throwing
-    /// the calibration away and often landing the newcomer on top of an existing panel.
-    /// Instead butt it against its nearest already-placed neighbour in logical
-    /// left-to-right order and shift the panels beyond it by its width, so every gap
-    /// already measured between existing panels survives.
+    /// Re-seeding would repack every panel from the origin using raw EDID sizes, discarding
+    /// calibration. Instead butt the newcomer against its nearest placed neighbour and
+    /// shift the panels beyond it by its width, preserving every measured gap.
     static func insert(
         _ d: DisplayInfo, uuid newUUID: String, into cfg: inout LayoutConfig, from layout: Layout
     ) {
@@ -276,10 +253,9 @@ public enum PhysicalLayoutStore {
 
         var dirty = false
         if ids.allSatisfy({ cfg.placements[$0.uuid] == nil }) {
-            // Nothing calibrated for anything attached, so a full seed is the baseline.
-            // Merged per UUID, never assigned over `cfg`: seed only describes the attached
-            // displays, so replacing the config would drop every detached display's
-            // calibration and then persist that loss.
+            // Nothing calibrated for anything attached, so seed is the baseline. Merged per
+            // UUID, never assigned over `cfg`: seed omits detached displays, so replacing
+            // the config would drop their calibration.
             let seeded = try seed(from: logical)
             for (d, u) in ids {
                 guard let p = seeded.placements[u] else { throw PhysicalLayoutError.noUUID(d.name) }

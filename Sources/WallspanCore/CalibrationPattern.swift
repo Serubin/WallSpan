@@ -5,10 +5,9 @@ import AppKit
 
 /// A wallpaper designed to make bezel misalignment obvious.
 ///
-/// Long diagonals are the instrument: vernier acuity resolves a break in collinearity well
-/// below one pixel, and a diagonal responds to horizontal and vertical error at once.
-/// Drawn in millimetre space through the normal pipeline, so what reaches the screen is
-/// subject to exactly the layout being calibrated.
+/// Long diagonals are the instrument: vernier acuity resolves a break in collinearity far
+/// below one pixel, and a diagonal responds to both axes at once. Drawn in millimetre
+/// space through the normal pipeline, so it is subject to the layout being calibrated.
 public enum CalibrationPattern {
     /// - Parameter unionMM: the physical union being calibrated.
     /// - Parameter pxPerMM: rasterisation density; the pattern is resolution-independent.
@@ -21,72 +20,73 @@ public enum CalibrationPattern {
         func mmX(_ v: CGFloat) -> CGFloat { (v - unionMM.minX) * pxPerMM }
         func mmY(_ v: CGFloat) -> CGFloat { (v - unionMM.minY) * pxPerMM }
         func line(_ mm: CGFloat) -> CGFloat { max(1, mm * pxPerMM) }
+        let slope = CGFloat(0.5774)   // tan(30 deg)
+
+        /// Parallel rules snapped to a multiple of `spacing`, so the grid is absolute.
+        func addRules(every spacing: CGFloat, vertical: Bool) {
+            var v = ((vertical ? unionMM.minX : unionMM.minY) / spacing).rounded(.down) * spacing
+            let limit = vertical ? unionMM.maxX : unionMM.maxY
+            while v <= limit {
+                if vertical {
+                    ctx.move(to: CGPoint(x: mmX(v), y: 0))
+                    ctx.addLine(to: CGPoint(x: mmX(v), y: CGFloat(h)))
+                } else {
+                    ctx.move(to: CGPoint(x: 0, y: mmY(v)))
+                    ctx.addLine(to: CGPoint(x: CGFloat(w), y: mmY(v)))
+                }
+                v += spacing
+            }
+        }
+
+        /// Both axes in one stroke; two would double-composite every crossing.
+        func grid(every spacing: CGFloat, width: CGFloat, color: CGColor) {
+            ctx.setLineWidth(line(width))
+            ctx.setStrokeColor(color)
+            addRules(every: spacing, vertical: true)
+            addRules(every: spacing, vertical: false)
+            ctx.strokePath()
+        }
+
+        func rules(every spacing: CGFloat, vertical: Bool, width: CGFloat, color: CGColor) {
+            ctx.setLineWidth(line(width))
+            ctx.setStrokeColor(color)
+            addRules(every: spacing, vertical: vertical)
+            ctx.strokePath()
+        }
+
+        /// One family of ~30-degree diagonals; `rising` picks which end carries the run.
+        func diagonals(rising: Bool, width: CGFloat, color: CGColor) {
+            ctx.setLineWidth(line(width))
+            ctx.setStrokeColor(color)
+            let run = unionMM.height / slope
+            var c = unionMM.minX - run
+            while c <= unionMM.maxX + unionMM.height {
+                let (bottom, top) = rising ? (c, c + run) : (c + run, c)
+                ctx.move(to: CGPoint(x: mmX(bottom), y: mmY(unionMM.minY)))
+                ctx.addLine(to: CGPoint(x: mmX(top), y: mmY(unionMM.maxY)))
+                c += 120
+            }
+            ctx.strokePath()
+        }
 
         ctx.setFillColor(CGColor(srgbRed: 0.05, green: 0.06, blue: 0.09, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
 
         // 10 mm grid, faint — gives an absolute scale reference across both panels.
-        ctx.setLineWidth(line(0.25))
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.13))
-        var gx = (unionMM.minX / 10).rounded(.down) * 10
-        while gx <= unionMM.maxX {
-            ctx.move(to: CGPoint(x: mmX(gx), y: 0)); ctx.addLine(to: CGPoint(x: mmX(gx), y: CGFloat(h)))
-            gx += 10
-        }
-        var gy = (unionMM.minY / 10).rounded(.down) * 10
-        while gy <= unionMM.maxY {
-            ctx.move(to: CGPoint(x: 0, y: mmY(gy))); ctx.addLine(to: CGPoint(x: CGFloat(w), y: mmY(gy)))
-            gy += 10
-        }
-        ctx.strokePath()
+        grid(every: 10, width: 0.25, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.13))
 
         // 100 mm majors, brighter.
-        ctx.setLineWidth(line(0.5))
-        ctx.setStrokeColor(CGColor(srgbRed: 0.4, green: 0.8, blue: 1, alpha: 0.38))
-        var mx = (unionMM.minX / 100).rounded(.down) * 100
-        while mx <= unionMM.maxX {
-            ctx.move(to: CGPoint(x: mmX(mx), y: 0)); ctx.addLine(to: CGPoint(x: mmX(mx), y: CGFloat(h)))
-            mx += 100
-        }
-        var my = (unionMM.minY / 100).rounded(.down) * 100
-        while my <= unionMM.maxY {
-            ctx.move(to: CGPoint(x: 0, y: mmY(my))); ctx.addLine(to: CGPoint(x: CGFloat(w), y: mmY(my)))
-            my += 100
-        }
-        ctx.strokePath()
+        grid(every: 100, width: 0.5, color: CGColor(srgbRed: 0.4, green: 0.8, blue: 1, alpha: 0.38))
 
-        // The instrument: long diagonals at ~30 degrees, spaced 120 mm.
-        ctx.setLineWidth(line(1.2))
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 0.85, blue: 0.2, alpha: 0.95))
-        let slope = CGFloat(0.5774)   // tan(30 deg)
-        var c = unionMM.minX - unionMM.height / slope
-        while c <= unionMM.maxX + unionMM.height {
-            ctx.move(to: CGPoint(x: mmX(c), y: mmY(unionMM.minY)))
-            ctx.addLine(to: CGPoint(x: mmX(c + unionMM.height / slope), y: mmY(unionMM.maxY)))
-            c += 120
-        }
-        ctx.strokePath()
-
-        // Counter-diagonals: at the crossings, residual error shows as a broken X.
-        ctx.setLineWidth(line(0.8))
-        ctx.setStrokeColor(CGColor(srgbRed: 0.2, green: 1, blue: 0.75, alpha: 0.75))
-        c = unionMM.minX - unionMM.height / slope
-        while c <= unionMM.maxX + unionMM.height {
-            ctx.move(to: CGPoint(x: mmX(c + unionMM.height / slope), y: mmY(unionMM.minY)))
-            ctx.addLine(to: CGPoint(x: mmX(c), y: mmY(unionMM.maxY)))
-            c += 120
-        }
-        ctx.strokePath()
+        // The instrument: diagonals at 120 mm. Crossings break into an X on error.
+        diagonals(rising: true, width: 1.2,
+                  color: CGColor(srgbRed: 1, green: 0.85, blue: 0.2, alpha: 0.95))
+        diagonals(rising: false, width: 0.8,
+                  color: CGColor(srgbRed: 0.2, green: 1, blue: 0.75, alpha: 0.75))
 
         // Horizontal rules isolate pure vertical error: they break into visible steps.
-        ctx.setLineWidth(line(1.0))
-        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 0.35, blue: 0.45, alpha: 0.9))
-        var hy = (unionMM.minY / 50).rounded(.down) * 50
-        while hy <= unionMM.maxY {
-            ctx.move(to: CGPoint(x: 0, y: mmY(hy))); ctx.addLine(to: CGPoint(x: CGFloat(w), y: mmY(hy)))
-            hy += 50
-        }
-        ctx.strokePath()
+        rules(every: 50, vertical: false, width: 1.0,
+              color: CGColor(srgbRed: 1, green: 0.35, blue: 0.45, alpha: 0.9))
 
         // Concentric rings centred on the union: a circle crossing a seam is unforgiving.
         ctx.setLineWidth(line(0.9))

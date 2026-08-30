@@ -6,10 +6,9 @@ import AppKit
 /// Verifies the render by inverting the mapping rather than inferring correctness from
 /// local smoothness.
 ///
-/// For a sample of output pixels it computes which source pixel the physical layout says
-/// it came from, and checks the rendered value is consistent with the source there. Valid
-/// in every configuration, including a calibrated layout with real bezel gaps, where the
-/// seam is legitimately discontinuous and a continuity premise would not hold.
+/// For a sample of output pixels it computes which source pixel the layout says it came
+/// from and checks the rendered value matches. Valid on every layout, including a
+/// calibrated one with real bezel gaps, where a continuity premise would not hold.
 public enum MappingVerifier {
     /// Flattens a CGImage into tightly-packed RGBA8 for cheap random access.
     static func pixels(_ image: CGImage) -> (data: [UInt8], width: Int, height: Int)? {
@@ -83,8 +82,7 @@ public enum MappingVerifier {
 
         /// Zero must be the minimum *by a clear margin*, not below an absolute rate: a
         /// residual at true alignment is expected, since the expected value is bilinear
-        /// while CoreGraphics resamples with a higher-order filter and the pattern is all
-        /// sharp edges. A geometry error changes the *ratio* to the neighbours.
+        /// while CoreGraphics resamples higher-order. An error changes the *ratio*.
         public var margin: Double { zeroRate > 0 ? runnerUpRate / zeroRate : .infinity }
         public var passed: Bool { best == 0 && margin >= 2.5 }
 

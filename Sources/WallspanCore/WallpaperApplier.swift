@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Solomon <serubin@serubin.net>
 
 import AppKit
-import CryptoKit
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -37,20 +36,16 @@ public enum WallpaperApplier {
     /// Identity of a render: same source bytes + same physical arrangement => same
     /// directory. Hashes the PHYSICAL fingerprint, so a `layout nudge` invalidates it;
     /// the logical one would serve stale renders and make calibration look inert.
-    public static func renderKey(source: URL, layout: PhysicalLayout, mode: String = "union") -> String {
+    public static func renderKey(source: URL, layout: PhysicalLayout) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: source.path)
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-        let canonical = "\(source.path)|\(mtime)|\(size)|\(layout.fingerprint)|\(mode)"
-        return SHA256.hash(data: Data(canonical.utf8))
-            .map { String(format: "%02x", $0) }.joined()
+        return sha256Hex("\(source.path)|\(mtime)|\(size)|\(layout.fingerprint)")
     }
 
-    /// Encodes to a sibling temp file and swaps it in.
-    ///
-    /// Writing the final path directly leaves a truncated PNG if the process dies mid
-    /// encode, and `materialize` tests the cache by existence alone — so a partial file
-    /// would be served as a hit forever. With the swap, a file that exists is complete.
+    /// Encodes to a sibling temp file and swaps it in, so a file that exists is complete.
+    /// `materialize` tests the cache by existence alone, so a PNG truncated by a crash
+    /// would otherwise be served as a hit forever.
     public static func writePNG(_ image: CGImage, to url: URL) throws {
         let tmp = url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
@@ -108,28 +103,24 @@ public enum WallpaperApplier {
         return results
     }
 
-    /// Per-display file name, keyed by UUID rather than `CGDirectDisplayID`.
-    ///
-    /// The render key hashes the UUID-based physical fingerprint, so ID-named files miss
-    /// after every reassignment and re-render a second set beside the unreachable ones.
+    /// Per-display file name, keyed by UUID: the render key hashes the UUID-based physical
+    /// fingerprint, so ID-named files miss after every reassignment.
     static func screenFile(in dir: URL, uuid: String) -> URL {
         dir.appendingPathComponent("screen_\(uuid).png")
     }
 
-    /// How many render sets to keep. Without a cap, a cycling agent over a large folder
-    /// grows the cache forever - one directory of multi-megabyte PNGs per image.
+    /// How many render sets to keep; uncapped, a cycling agent grows the cache forever.
     static let cacheLimit = 50
 
-    /// Marks a render set as most recently used, so eviction is LRU rather than
-    /// first-rendered-first-out.
+    /// Marks a render set most recently used, so eviction is LRU.
     static func touch(_ dir: URL) {
         try? FileManager.default.setAttributes(
             [.modificationDate: Date()], ofItemAtPath: dir.path
         )
     }
 
-    /// Evicts the least recently used render sets beyond `cacheLimit`. The set just
-    /// touched is always the newest, so the wallpaper in use is never the one deleted.
+    /// Evicts the least recently used sets beyond `cacheLimit`. The set just touched is
+    /// newest, so the wallpaper in use is never evicted.
     static func prune(limit: Int = cacheLimit) {
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(
@@ -152,9 +143,7 @@ public enum WallpaperApplier {
     public static func apply(_ results: [ApplyResult]) throws {
         let screensByID = Dictionary(
             uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, NSScreen)? in
-                guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-                else { return nil }
-                return (n.uint32Value, screen)
+                screen.displayID.map { ($0, screen) }
             }
         )
 
@@ -196,30 +185,25 @@ public enum WallpaperApplier {
 
     public static func currentWallpapers() -> [WallspanState.Snapshot] {
         NSScreen.screens.compactMap { screen in
-            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-            else { return nil }
+            guard let id = screen.displayID else { return nil }
             return WallspanState.Snapshot(
-                displayID: n.uint32Value,
-                uuid: PhysicalLayoutStore.uuid(for: n.uint32Value),
+                displayID: id,
+                uuid: PhysicalLayoutStore.uuid(for: id),
                 path: NSWorkspace.shared.desktopImageURL(for: screen)?.path
             )
         }
     }
 
     /// Puts back a previously captured snapshot, returning what it actually restored.
-    ///
-    /// Matches on UUID: `CGDirectDisplayID` is reassigned across reboots and reconnects, so
-    /// keying on it puts wallpapers back on the wrong screens after a swap. Snapshots
-    /// written before `uuid` was recorded fall back to it.
+    /// Matches on UUID - `CGDirectDisplayID` is reassigned across reboots, so keying on it
+    /// restores onto the wrong screens. Pre-`uuid` snapshots fall back to the ID.
     @discardableResult
     public static func restore(
         _ snapshots: [WallspanState.Snapshot]
     ) throws -> [(display: String, path: String)] {
         var restored: [(display: String, path: String)] = []
         for screen in NSScreen.screens {
-            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-            else { continue }
-            let id = n.uint32Value
+            guard let id = screen.displayID else { continue }
             let uuid = PhysicalLayoutStore.uuid(for: id)
             let match = snapshots.first { $0.uuid != nil && $0.uuid == uuid }
                 ?? snapshots.first { $0.uuid == nil && $0.displayID == id }

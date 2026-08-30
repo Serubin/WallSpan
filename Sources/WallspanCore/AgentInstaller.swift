@@ -3,11 +3,10 @@
 
 import Foundation
 
-/// Installs `wallspan cycle` as a per-user LaunchAgent.
-///
-/// Not a cron job: `setDesktopImageURL` needs a GUI audit session, which only the Aqua
-/// session an agent loads into provides. `RunAtLoad` also re-applies at login, covering
-/// macOS's failure to restore a third-party wallpaper across a restart.
+/// Installs `wallspan cycle` as a per-user LaunchAgent. Not cron: `setDesktopImageURL`
+/// needs a GUI audit session, which only an agent in the Aqua session gets. `RunAtLoad`
+/// also re-applies at login, covering macOS's failure to restore a third-party wallpaper
+/// across a restart.
 public enum AgentInstaller {
     public static let defaultLabel = "net.serubin.wallspan"
 
