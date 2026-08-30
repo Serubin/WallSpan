@@ -35,10 +35,17 @@ struct Args {
             let isFlag = a.hasPrefix("--") || (a.hasPrefix("-") && a.count == 2)
             guard isFlag else { pos.append(a); i += 1; continue }
 
-            var key = a.hasPrefix("--") ? String(a.dropFirst(2)) : String(a.dropFirst(1))
+            let key = a.hasPrefix("--") ? String(a.dropFirst(2)) : String(a.dropFirst(1))
             // --key=value
             if let eq = key.firstIndex(of: "=") {
-                vals[String(key[key.startIndex..<eq])] = String(key[key.index(after: eq)...])
+                let name = String(key[key.startIndex..<eq])
+                // Tested here rather than after the booleanFlags check below, which this
+                // branch jumps over: `--dry-run=true` would otherwise be filed under
+                // `values`, leaving has() false and the apply real.
+                if Args.booleanFlags.contains(name) {
+                    fail("--\(name) takes no value; it is on when present")
+                }
+                vals[name] = String(key[key.index(after: eq)...])
                 i += 1
                 continue
             }
@@ -50,7 +57,6 @@ struct Args {
             }
             // Unknown flag with nothing after it: record it so `has()` still sees it.
             fl.insert(key)
-            key = ""
             i += 1
         }
         positionals = pos; flags = fl; values = vals
