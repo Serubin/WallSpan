@@ -85,6 +85,32 @@ func expand(_ path: String) -> URL {
 }
 
 /// "14mm", "14", "-3.5mm", "1.4cm" -> millimetres.
+/// nil when the flag is absent; fails when it is present but unusable.
+///
+/// `args.value(k).flatMap(parseMM)` collapses "absent" and "present but garbage" into the
+/// same nil, so a typo like `--width 800in` was silently skipped and the command still
+/// reported success. `positive` additionally rejects 0 and negatives, which parse fine and
+/// then trap much later: a zero width makes maxPxPerMM infinite, and converting that to Int
+/// is a Swift runtime trap rather than an error message.
+///
+/// `isFinite` closes that same trap from the other side. `Double` parses "inf" and "nan",
+/// and `v <= 0.1` catches neither — NaN compares false against everything — so both reached
+/// layout.json and made every later `apply` trap on a value only a hand edit could remove.
+func measurement(_ key: String, positive: Bool = false) -> CGFloat? {
+    // Args files a value-taking flag with nothing usable after it under `flags`, not
+    // `values` - so `--width` alone, or `--width --height 300mm`, reads as absent here and
+    // the measurement would be skipped with the same false success.
+    if args.has(key) { fail("--\(key) needs a value, e.g. --\(key) 797.22mm") }
+    guard let raw = args.value(key) else { return nil }
+    guard let v = parseMM(raw), v.isFinite else {
+        fail("--\(key) needs a length like 797.22mm, 79.7cm or 797.22 — got '\(raw)'")
+    }
+    if positive, v <= 0.1 {
+        fail("--\(key) must be a positive length — got '\(raw)'")
+    }
+    return v
+}
+
 func parseMM(_ s: String) -> CGFloat? {
     let t = s.trimmingCharacters(in: .whitespaces).lowercased()
     if t.hasSuffix("cm") { return Double(t.dropLast(2)).map { CGFloat($0 * 10) } }
@@ -244,23 +270,25 @@ func cmdLayout() throws {
 
         switch sub {
         case "nudge":
-            let dx = args.value("dx").flatMap(parseMM) ?? 0
-            let dy = args.value("dy").flatMap(parseMM) ?? 0
+            let dx = measurement("dx") ?? 0
+            let dy = measurement("dy") ?? 0
             guard dx != 0 || dy != 0 else { fail("nudge needs --dx and/or --dy, e.g. --dx 14mm") }
             p.originMM = CGPoint(x: p.originMM.x + dx, y: p.originMM.y + dy)
             print(String(format: "%@: origin %+.1f, %+.1f mm -> (%.1f, %.1f)",
                          p.name, dx, dy, p.originMM.x, p.originMM.y))
         case "set":
-            if let x = args.value("origin-x").flatMap(parseMM) { p.originMM.x = x }
-            if let y = args.value("origin-y").flatMap(parseMM) { p.originMM.y = y }
+            // Not `positive`: a negative origin is legitimate — the portrait panel sits
+            // at negative y in the calibrated layout.
+            if let x = measurement("origin-x") { p.originMM.x = x }
+            if let y = measurement("origin-y") { p.originMM.y = y }
             print(String(format: "%@: origin = (%.1f, %.1f) mm", p.name, p.originMM.x, p.originMM.y))
         default:
             // Correcting a measurement must not move the panel or invent a gap.
             // Horizontally everything to the right shifts by the width delta, preserving
             // calibrated gaps. Vertically the centre is held: the panel did not move.
             let oldW = p.sizeMM.width, oldH = p.sizeMM.height
-            if let w = args.value("width").flatMap(parseMM) { p.sizeMM.width = w }
-            if let h = args.value("height").flatMap(parseMM) { p.sizeMM.height = h }
+            if let w = measurement("width", positive: true) { p.sizeMM.width = w }
+            if let h = measurement("height", positive: true) { p.sizeMM.height = h }
             p.originMM.y -= (p.sizeMM.height - oldH) / 2
             let dw = p.sizeMM.width - oldW
             cfg.sets[active].placements[uuid] = p
