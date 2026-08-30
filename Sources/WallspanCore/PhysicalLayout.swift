@@ -16,25 +16,66 @@ public struct Placement: Codable, Equatable {
     public var rectMM: CGRect { CGRect(origin: originMM, size: sizeMM) }
 }
 
-/// The persisted calibration, keyed by display UUID rather than `CGDirectDisplayID`:
-/// the integer IDs are reassigned across reboots and reconnects. macOS's own wallpaper
-/// store keys its `Displays` dictionary by the same UUIDs.
+/// One calibrated arrangement, identified by exactly which displays were attached.
+///
+/// A placement only means anything alongside the ones it was measured with: the same panel
+/// sits somewhere different when it is alone than when it is beside two others. Keying
+/// calibration by display alone forces those into one coordinate plane, where they overlap.
+///
+/// Displays are identified by UUID rather than `CGDirectDisplayID`, which is reassigned
+/// across reboots and reconnects. macOS keys its own wallpaper store the same way.
+public struct DisplaySet: Codable {
+    public var displays: [String]
+    public var placements: [String: Placement]
+
+    public init(displays: [String], placements: [String: Placement]) {
+        self.displays = displays.sorted()
+        self.placements = placements
+    }
+}
+
 public struct LayoutConfig: Codable {
-    public var version: Int = 1
-    public var placements: [String: Placement] = [:]
+    public var version: Int = 2
+    public var sets: [DisplaySet] = []
 
     public init() {}
+
+    /// The set calibrated for exactly these displays.
+    public func exactIndex(for uuids: [String]) -> Int? {
+        let key = uuids.sorted()
+        return sets.firstIndex { $0.displays == key }
+    }
+
+    /// The calibrated set sharing the most displays, so a new combination can be derived
+    /// from measurements already taken rather than starting blank.
+    func bestSubsetIndex(for uuids: [String]) -> Int? {
+        let want = Set(uuids)
+        return sets.indices
+            .map { ($0, want.intersection(sets[$0].displays).count) }
+            .filter { $0.1 > 0 }
+            .max { $0.1 < $1.1 }?.0
+    }
 }
 
 public enum PhysicalLayoutError: Error, CustomStringConvertible {
     case noScreens
+    case noActiveSet
     case noUUID(String)
+    case duplicateUUID([String])
     case displayNotFound(String)
     case ambiguousDisplay(String, [String])
 
     public var description: String {
         switch self {
         case .noScreens: return "no displays found"
+        case .noActiveSet: return "no calibration stored for the displays attached now"
+        case .duplicateUUID(let names):
+            return """
+            these displays report the same UUID, so their calibration cannot be told
+                   apart: \(names.joined(separator: ", "))
+                   macOS derives the UUID from EDID, and panels that report no serial
+                   number collide. Attach only one of them, or use different models.
+            """
         case .noUUID(let n): return "could not resolve a stable UUID for display \(n)"
         case .displayNotFound(let q): return "no display matching '\(q)'"
         case .ambiguousDisplay(let q, let names):
@@ -145,35 +186,35 @@ public enum PhysicalLayoutStore {
     /// Horizontally: edge-to-edge in left-to-right order, so the gap is exactly 0.
     /// Vertically: the exact inverse of `DisplayArranger.plan`, by fixed-point iteration —
     /// `plan` matches physical heights per-panel density, so there is no closed form.
-    public static func seed(from layout: Layout) throws -> LayoutConfig {
+    public static func seed(from layout: Layout) throws -> [String: Placement] {
         guard !layout.displays.isEmpty else { throw PhysicalLayoutError.noScreens }
 
         // Left-to-right by logical position, so physical order matches what is seen.
         let ordered = layout.displays.sorted { $0.frame.minX < $1.frame.minX }
-        var cfg = LayoutConfig()
+        var placements: [String: Placement] = [:]
         var cursorX: CGFloat = 0
         for d in ordered {
             guard let uuid = uuid(for: d.id) else { throw PhysicalLayoutError.noUUID(d.name) }
             let size = edidSizeMM(for: d.id)
-            cfg.placements[uuid] = Placement(
+            placements[uuid] = Placement(
                 uuid: uuid, name: d.name,
                 originMM: CGPoint(x: cursorX, y: 0), sizeMM: size
             )
             cursorX += size.width
         }
 
-        refineVertical(&cfg, from: layout)
-        return cfg
+        refineVertical(&placements, from: layout)
+        return placements
     }
 
     /// Refines placement y until `plan` would leave the arrangement untouched. `only`
     /// limits which placements may move, so a newcomer solves without disturbing others.
     static func refineVertical(
-        _ cfg: inout LayoutConfig, from layout: Layout, only: Set<String>? = nil
+        _ placements: inout [String: Placement], from layout: Layout, only: Set<String>? = nil
     ) {
         for _ in 0..<24 {
             let entries = layout.displays.compactMap { d -> (DisplayInfo, Placement)? in
-                guard let u = uuid(for: d.id), let p = cfg.placements[u] else { return nil }
+                guard let u = uuid(for: d.id), let p = placements[u] else { return nil }
                 return (d, p)
             }
             guard let probe = try? PhysicalLayout(entries: entries) else { return }
@@ -181,11 +222,11 @@ public enum PhysicalLayoutStore {
             for t in DisplayArranger.plan(probe) {
                 if let only, !only.contains(t.uuid) { continue }
                 let err = Double(t.requestedYDown - t.currentYDown)
-                guard var p = cfg.placements[t.uuid] else { continue }
+                guard var p = placements[t.uuid] else { continue }
                 let ptMM = DisplayArranger.ptPerMM(t.display, p)
                 guard ptMM > 0 else { continue }
                 p.originMM.y += CGFloat(err / ptMM)
-                cfg.placements[t.uuid] = p
+                placements[t.uuid] = p
                 worst = max(worst, abs(err))
             }
             if worst < 0.25 { return }
@@ -198,13 +239,14 @@ public enum PhysicalLayoutStore {
     /// calibration. Instead butt the newcomer against its nearest placed neighbour and
     /// shift the panels beyond it by its width, preserving every measured gap.
     static func insert(
-        _ d: DisplayInfo, uuid newUUID: String, into cfg: inout LayoutConfig, from layout: Layout
+        _ d: DisplayInfo, uuid newUUID: String,
+        into placements: inout [String: Placement], from layout: Layout
     ) {
         let size = edidSizeMM(for: d.id)
         let ordered = layout.displays.sorted { $0.frame.minX < $1.frame.minX }
         let idx = ordered.firstIndex { $0.id == d.id } ?? 0
         func placement(_ x: DisplayInfo) -> Placement? {
-            uuid(for: x.id).flatMap { cfg.placements[$0] }
+            uuid(for: x.id).flatMap { placements[$0] }
         }
         let left = ordered[..<idx].reversed().compactMap(placement).first
         let right = ordered[(idx + 1)...].compactMap(placement).first
@@ -213,9 +255,9 @@ public enum PhysicalLayoutStore {
         if let left {
             origin.x = left.rectMM.maxX
             for other in ordered[(idx + 1)...] {
-                guard let u = uuid(for: other.id), var p = cfg.placements[u] else { continue }
+                guard let u = uuid(for: other.id), var p = placements[u] else { continue }
                 p.originMM.x += size.width
-                cfg.placements[u] = p
+                placements[u] = p
             }
         } else if let right {
             origin.x = right.originMM.x - size.width
@@ -233,44 +275,75 @@ public enum PhysicalLayoutStore {
             }
         }
 
-        cfg.placements[newUUID] = Placement(
+        placements[newUUID] = Placement(
             uuid: newUUID, name: d.name, originMM: origin, sizeMM: size
         )
-        refineVertical(&cfg, from: layout, only: [newUUID])
+        refineVertical(&placements, from: layout, only: [newUUID])
     }
 
     /// Builds the layout for the displays attached now, seeding any the config has never
     /// seen (a newly connected monitor) rather than failing.
+    /// The displays attached right now, sorted - the key into `LayoutConfig.sets`.
+    public static func activeKey() throws -> [String] {
+        try Layout.current().displays.map {
+            guard let u = uuid(for: $0.id) else { throw PhysicalLayoutError.noUUID($0.name) }
+            return u
+        }.sorted()
+    }
+
+    /// The config plus the index of the set for the displays attached now.
+    ///
+    /// `current()` creates that set, so any caller that has resolved a layout will find it.
+    public static func loadActive() throws -> (cfg: LayoutConfig, index: Int) {
+        let cfg = load()
+        guard let i = cfg.exactIndex(for: try activeKey()) else {
+            throw PhysicalLayoutError.noActiveSet
+        }
+        return (cfg, i)
+    }
+
     public static func current() throws -> PhysicalLayout {
         let logical = try Layout.current()
-        var cfg = load()
-
         var ids: [(display: DisplayInfo, uuid: String)] = []
         for d in logical.displays {
             guard let u = uuid(for: d.id) else { throw PhysicalLayoutError.noUUID(d.name) }
             ids.append((d, u))
         }
+        let key = ids.map(\.uuid).sorted()
+        // Two panels sharing a UUID would silently share one placement, so every edit to
+        // either would move both. Refuse rather than mis-calibrate: CGDisplayUnitNumber
+        // tells them apart within a session but is reassigned, so it cannot be persisted.
+        guard Set(key).count == key.count else {
+            let dupes = Dictionary(grouping: ids, by: \.uuid)
+                .filter { $0.value.count > 1 }
+                .flatMap { $0.value.map(\.display.name) }
+            throw PhysicalLayoutError.duplicateUUID(dupes.sorted())
+        }
 
+        var cfg = load()
         var dirty = false
-        if ids.allSatisfy({ cfg.placements[$0.uuid] == nil }) {
-            // Nothing calibrated for anything attached, so seed is the baseline. Merged per
-            // UUID, never assigned over `cfg`: seed omits detached displays, so replacing
-            // the config would drop their calibration.
-            let seeded = try seed(from: logical)
-            for (d, u) in ids {
-                guard let p = seeded.placements[u] else { throw PhysicalLayoutError.noUUID(d.name) }
-                cfg.placements[u] = p
-            }
-            dirty = true
+        var placements: [String: Placement]
+
+        if let i = cfg.exactIndex(for: key) {
+            placements = cfg.sets[i].placements
         } else {
-            for (d, u) in ids where cfg.placements[u] == nil {
-                insert(d, uuid: u, into: &cfg, from: logical)
-                dirty = true
+            // Derive from whichever set shares the most displays, so plugging one more in
+            // inherits the gaps already measured instead of starting blank. Only when
+            // nothing overlaps is a from-scratch seed the right baseline.
+            if let j = cfg.bestSubsetIndex(for: key) {
+                placements = cfg.sets[j].placements.filter { key.contains($0.key) }
+                for (d, u) in ids where placements[u] == nil {
+                    insert(d, uuid: u, into: &placements, from: logical)
+                }
+            } else {
+                placements = try seed(from: logical)
             }
+            cfg.sets.append(DisplaySet(displays: key, placements: placements))
+            dirty = true
         }
 
         let entries = try ids.map { (d, u) -> (DisplayInfo, Placement) in
-            guard let p = cfg.placements[u] else { throw PhysicalLayoutError.noUUID(d.name) }
+            guard let p = placements[u] else { throw PhysicalLayoutError.noUUID(d.name) }
             return (d, p)
         }
         if dirty { try? save(cfg) }

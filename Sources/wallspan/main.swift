@@ -204,10 +204,23 @@ func cmdLayout() throws {
     switch sub {
     case "show":
         print(layout)
+        print("set: \(layout.entries.map(\.placement.name).joined(separator: " + "))")
         print("config: \(PhysicalLayoutStore.configURL.path)")
 
+    case "list":
+        let cfg = PhysicalLayoutStore.load()
+        guard !cfg.sets.isEmpty else { fail("no display sets calibrated yet") }
+        let active = (try? PhysicalLayoutStore.activeKey()) ?? []
+        for s in cfg.sets.sorted(by: { $0.displays.count < $1.displays.count }) {
+            let names = s.displays.compactMap { s.placements[$0]?.name }.joined(separator: " + ")
+            print("\(s.displays == active ? " *" : "  ") \(s.displays.count)  \(names)")
+        }
+        print("\n* = attached now. Each set keeps its own calibration.")
+
     case "reset":
-        let cfg = try PhysicalLayoutStore.seed(from: try Layout.current())
+        // Scoped to the active set; other display combinations keep their calibration.
+        var (cfg, i) = try PhysicalLayoutStore.loadActive()
+        cfg.sets[i].placements = try PhysicalLayoutStore.seed(from: try Layout.current())
         try PhysicalLayoutStore.save(cfg)
         print("re-seeded from EDID + current arrangement (gaps back to 0)")
         if StateStore.load().originalArrangement != nil {
@@ -226,8 +239,8 @@ func cmdLayout() throws {
             fail("usage: wallspan layout \(sub) <display> ...  (display = index or name substring)")
         }
         let uuid = try PhysicalLayoutStore.resolve(args.positionals[1], in: layout)
-        var cfg = PhysicalLayoutStore.load()
-        guard var p = cfg.placements[uuid] else { fail("display not in config") }
+        var (cfg, active) = try PhysicalLayoutStore.loadActive()
+        guard var p = cfg.sets[active].placements[uuid] else { fail("display not in config") }
 
         switch sub {
         case "nudge":
@@ -250,12 +263,12 @@ func cmdLayout() throws {
             if let h = args.value("height").flatMap(parseMM) { p.sizeMM.height = h }
             p.originMM.y -= (p.sizeMM.height - oldH) / 2
             let dw = p.sizeMM.width - oldW
-            cfg.placements[uuid] = p
+            cfg.sets[active].placements[uuid] = p
             if dw != 0 {
-                for (k, var other) in cfg.placements where k != uuid {
+                for (k, var other) in cfg.sets[active].placements where k != uuid {
                     if other.originMM.x > p.originMM.x {
                         other.originMM.x += dw
-                        cfg.placements[k] = other
+                        cfg.sets[active].placements[k] = other
                     }
                 }
             }
@@ -269,7 +282,7 @@ func cmdLayout() throws {
             }
         }
 
-        cfg.placements[uuid] = p
+        cfg.sets[active].placements[uuid] = p
         try PhysicalLayoutStore.save(cfg)
         layout = try PhysicalLayoutStore.current()
         for g in layout.horizontalGaps {
@@ -278,7 +291,8 @@ func cmdLayout() throws {
         print("\nrun `wallspan calibrate` to see the effect")
 
     default:
-        fail("unknown: wallspan layout \(sub)  (show | reset | nudge | set | size | arrange)")
+        fail("unknown: wallspan layout \(sub)"
+             + "  (show | list | reset | nudge | set | size | arrange)")
     }
 }
 
@@ -834,9 +848,15 @@ func usage() {
       makes the picture look continuous.
 
       wallspan layout show
+      wallspan layout list                                # every calibrated set
       wallspan layout nudge <display> --dx 14mm --dy -3mm
       wallspan layout size  <display> --width 797.2mm     # override bad EDID
       wallspan layout reset                               # back to edge-to-edge
+
+      Calibration is per display SET: the laptop alone, the two externals, and
+      all three together each keep their own. Editing one leaves the rest
+      untouched, and a new combination inherits from the closest one you have
+      already measured.
 
       wallspan layout arrange [--dry-run] [--revert]
           Push the calibrated VERTICAL offsets into macOS's own display
