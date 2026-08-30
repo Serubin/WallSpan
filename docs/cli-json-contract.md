@@ -109,8 +109,11 @@ Next that silently does nothing.
 - `config.configPath` — where the settings live, for a "reveal in Finder" affordance.
 - `layout.calibrated` — false while every gap is still zero, i.e. seeded from EDID but
   never measured.
-- `layout.displays[].densitySuspect` — EDID implies non-square pixels, so `layout size` is
-  worth running.
+- `layout.displays[].reportedSizeMM` — what the panel itself claims, beside `sizeMM`,
+  which holds the corrected figure. They differ when a panel reported non-square
+  pixels; showing both is what makes the correction overrulable.
+- `layout.displays[].densitySuspect` — the size in use still implies non-square pixels,
+  which after correction means it was set by hand.
 - `gaps[].leftUUID` / `.rightUUID` — the names beside them are for display only. Two
   identical monitors report the same `localizedName`, so a caller mapping a gap back to a
   panel it can nudge must use the UUID. `layout nudge` accepts a UUID as well as an index
