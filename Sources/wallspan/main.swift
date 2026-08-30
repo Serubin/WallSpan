@@ -16,11 +16,10 @@ struct Args {
     private let flags: Set<String>
     private let values: [String: String]
 
-    /// Flags that take no value. Everything else consumes the next token.
+    /// Flags that take no value; everything else consumes the next token.
     ///
-    /// The inverse of an allowlist of value-*taking* flags, which has to be extended for
-    /// every new option and silently drops the value when it is not. Booleans are the
-    /// small, stable set.
+    /// The inverse of an allowlist of value-*taking* flags, which must be extended for
+    /// every new option and silently drops the value when it is not. Booleans are stable.
     static let booleanFlags: Set<String> = [
         "dry-run", "sequential", "shuffle", "recursive", "no-recursive",
         "revert", "purge", "help", "h",
@@ -176,7 +175,6 @@ func cmdApply() throws {
         // Snapshot before changing anything, so `restore` has somewhere to go back to.
         var state = StateStore.load()
         snapshotOriginalIfNeeded(&state)
-        state.lastApplied = image.path
         try StateStore.save(state)
     }
     try applyOnce(image: image, layout: layout, dryRun: dryRun)
@@ -245,9 +243,8 @@ func cmdLayout() throws {
             print(String(format: "%@: origin = (%.1f, %.1f) mm", p.name, p.originMM.x, p.originMM.y))
         default:
             // Correcting a measurement must not move the panel or invent a gap.
-            // Horizontally, everything to the right shifts by the width delta, preserving
-            // calibrated gaps. Vertically the centre is held: a re-measured panel did not
-            // physically move, so anchoring its bottom edge would translate it.
+            // Horizontally everything to the right shifts by the width delta, preserving
+            // calibrated gaps. Vertically the centre is held: the panel did not move.
             let oldW = p.sizeMM.width, oldH = p.sizeMM.height
             if let w = args.value("width").flatMap(parseMM) { p.sizeMM.width = w }
             if let h = args.value("height").flatMap(parseMM) { p.sizeMM.height = h }
@@ -441,10 +438,8 @@ func cmdRestore() throws {
 
 // MARK: - cycle
 
-/// Command-line values that outrank the config file.
-///
-/// Re-applied on top of every reload rather than merged once at startup: `cycle` re-reads
-/// the file each tick, so a one-shot merge is overwritten by the first reload.
+/// Command-line values that outrank the config file. Re-applied after every reload, not
+/// merged once at startup - `cycle` re-reads the file each tick.
 struct CycleOverrides {
     var playlistDirectory: String?
     var recursive: Bool?
@@ -488,10 +483,9 @@ final class Cycler {
 
     var interval: TimeInterval { config.intervalSeconds }
 
-    /// Polls the config file's mtime so `config set` is picked up independently of the
-    /// interval — re-reading only per tick would mean waiting an hour to lower an hourly
-    /// interval. mtime, not a `DispatchSource` watch: `ConfigStore.save` writes
-    /// atomically, replacing the inode, so a watch would go deaf after the first edit.
+    /// Polls the config file's mtime so `config set` lands independently of the interval —
+    /// otherwise lowering an hourly interval means waiting an hour. mtime, not a
+    /// `DispatchSource` watch: `ConfigStore.save` replaces the inode, deafening a watch.
     func startConfigWatch() {
         let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -530,8 +524,7 @@ final class Cycler {
         timer = t
     }
 
-    /// Re-ticks after a backoff. Every unusable-directory path needs this, or the run
-    /// stalls until the next scheduled tick.
+    /// Re-ticks after a backoff; without it an unusable directory stalls the run.
     func scheduleRetry() {
         retryWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.tick() }
@@ -582,10 +575,9 @@ final class Cycler {
         current = image
         print("[\(timestamp())] \(position)  \(image.lastPathComponent)")
 
-        // Snapshot BEFORE applying, and persist it before the desktop changes.
+        // Snapshot BEFORE applying, and persist before the desktop changes:
         // `currentWallpapers()` reads the live desktop and `originalWallpaper` is
-        // write-once, so capturing it afterwards would record our own render and lose the
-        // real wallpaper permanently.
+        // write-once, so capturing it later records our own render, permanently.
         var state = StateStore.load()
         if state.originalWallpaper == nil {
             snapshotOriginalIfNeeded(&state)
@@ -598,7 +590,6 @@ final class Cycler {
             FileHandle.standardError.write("  failed: \(error)\n".data(using: .utf8)!)
         }
         // Persist even if applying failed, so a transient failure cannot replay the image.
-        state.lastApplied = image.path
         pl.persist(into: &state)
         try? StateStore.save(state)
     }
@@ -693,6 +684,28 @@ func cmdCycle() throws {
 
 // MARK: - config + agent
 
+/// Applies the cycle flags to `cfg`, reporting whether anything changed. Shared by
+/// `config set` and `agent install` so they cannot disagree about flags or validation.
+func applyConfigFlags(to cfg: inout CycleConfig) -> Bool {
+    var touched = false
+    if let d = args.value("dir") {
+        let url = expand(d)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue
+        else { fail("not a directory: \(url.path)") }
+        cfg.playlistDirectory = url.path; touched = true
+    }
+    if let s = args.value("interval") {
+        guard let i = parseInterval(s) else { fail("bad --interval: \(s)") }
+        cfg.intervalSeconds = i; touched = true
+    }
+    if args.has("sequential") { cfg.shuffle = false; touched = true }
+    if args.has("shuffle") { cfg.shuffle = true; touched = true }
+    if args.has("recursive") { cfg.recursive = true; touched = true }
+    if args.has("no-recursive") { cfg.recursive = false; touched = true }
+    return touched
+}
+
 func cmdConfig() throws {
     let sub = args.positionals.first ?? "show"
     switch sub {
@@ -701,23 +714,7 @@ func cmdConfig() throws {
 
     case "set":
         var cfg = ConfigStore.load()
-        var touched = false
-        if let d = args.value("dir") {
-            let url = expand(d)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue
-            else { fail("not a directory: \(url.path)") }
-            cfg.playlistDirectory = url.path; touched = true
-        }
-        if let s = args.value("interval") {
-            guard let i = parseInterval(s) else { fail("bad --interval: \(s)") }
-            cfg.intervalSeconds = i; touched = true
-        }
-        if args.has("sequential") { cfg.shuffle = false; touched = true }
-        if args.has("shuffle") { cfg.shuffle = true; touched = true }
-        if args.has("recursive") { cfg.recursive = true; touched = true }
-        if args.has("no-recursive") { cfg.recursive = false; touched = true }
-        guard touched else {
+        guard applyConfigFlags(to: &cfg) else {
             fail("nothing to set. options: --dir <path> --interval 15m --shuffle|--sequential --recursive|--no-recursive")
         }
         try ConfigStore.save(cfg)
@@ -740,15 +737,7 @@ func cmdAgent() throws {
     case "install":
         // Let install double as `config set`, so one command gets you running.
         var cfg = ConfigStore.load()
-        var touched = false
-        if let d = args.value("dir") { cfg.playlistDirectory = expand(d).path; touched = true }
-        if let s = args.value("interval") {
-            guard let i = parseInterval(s) else { fail("bad --interval: \(s)") }
-            cfg.intervalSeconds = i; touched = true
-        }
-        if args.has("sequential") { cfg.shuffle = false; touched = true }
-        if args.has("recursive") { cfg.recursive = true; touched = true }
-        if touched { try ConfigStore.save(cfg) }
+        if applyConfigFlags(to: &cfg) { try ConfigStore.save(cfg) }
 
         guard let dir = cfg.directoryURL else {
             fail("""

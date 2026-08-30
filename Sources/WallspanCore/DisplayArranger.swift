@@ -3,10 +3,9 @@
 
 import AppKit
 
-/// Pushes the calibrated physical layout into macOS's own display arrangement, which
-/// decides where the cursor crosses between screens and where windows land.
-/// `CGConfigureDisplayOrigin` sets exact integer origins; System Settings only drags
-/// rectangles, too coarse for panels of different heights.
+/// Pushes the calibrated physical layout into macOS's display arrangement, which decides
+/// where the cursor crosses and where windows land. `CGConfigureDisplayOrigin` sets exact
+/// integer origins; System Settings only drags rectangles.
 ///
 /// **Vertical only.** macOS forces displays to be contiguous, so a bezel gap cannot be
 /// expressed in the arrangement — which is why wallspan models it separately.
@@ -45,11 +44,9 @@ public enum DisplayArranger {
         Double(d.frame.height) / Double(p.sizeMM.height)
     }
 
-    /// Computes where each non-main display should sit.
-    ///
-    /// Panels of differing density cannot agree at every height — macOS's global space has
-    /// no notion of physical size — so one height must be the match point, with error
-    /// growing away from it. The centre of the shared overlap halves the worst case.
+    /// Computes where each non-main display should sit. Panels of differing density cannot
+    /// agree at every height — macOS's global space has no notion of physical size — so one
+    /// height must be the match point. The centre of the shared overlap halves the error.
     public static func plan(_ layout: PhysicalLayout) -> [Target] {
         guard let ref = layout.entries.first else { return [] }
         let refBounds = CGDisplayBounds(ref.display.id)
