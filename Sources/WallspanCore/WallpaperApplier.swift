@@ -176,7 +176,20 @@ public enum WallpaperApplier {
         var pending = results
         var lastSeen: [CGDirectDisplayID: String?] = [:]
         while !pending.isEmpty, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.1)
+            // Drain the run loop rather than sleeping it. `cycle` calls this from a Timer
+            // on the main run loop, so a plain sleep froze the config watcher and the
+            // display-change debounce for as long as the read-back took — up to the full
+            // five seconds.
+            //
+            // Then sleep out the rest of the slice. `run(mode:before:)` returns as soon as
+            // one input source is handled, not at the limit date, so on its own it polls
+            // as fast as the main queue is busy — measured at ~660 reads in two seconds
+            // under `cycle`'s own timers, against the 20 intended. Each read is an IPC
+            // round-trip to the wallpaper store.
+            let slice = Date().addingTimeInterval(0.1)
+            RunLoop.current.run(mode: .default, before: slice)
+            let remaining = slice.timeIntervalSinceNow
+            if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
             pending.removeAll { r in
                 guard let screen = screensByID[r.display.id] else { return true }
                 let actual = NSWorkspace.shared.desktopImageURL(for: screen)?.path

@@ -516,6 +516,11 @@ final class Cycler {
     /// Single-flight, so retries cannot compound: both the repeating timer and each retry
     /// call `tick()`.
     var retryWork: DispatchWorkItem?
+    /// True while an apply is in flight. Needed because the read-back now turns the run
+    /// loop instead of blocking it, so a timer or a queued block can land mid-apply. Every
+    /// path that applies goes through `apply(_:layout:)` to hold it, or two applies
+    /// interleave on the same screens.
+    var applying = false
 
     init(layout: PhysicalLayout, config: CycleConfig, overrides: CycleOverrides) {
         self.layout = layout
@@ -601,19 +606,62 @@ final class Cycler {
         }
     }
 
+    /// The cycler's only route to `applyOnce`, so `applying` cannot be bypassed.
+    /// Saves and restores rather than clearing, so a caller already holding the flag
+    /// (`advance`) still holds it when this returns.
+    func apply(_ image: URL, layout: PhysicalLayout) {
+        let wasApplying = applying
+        applying = true
+        defer { applying = wasApplying }
+        do {
+            try applyOnce(image: image, layout: layout, dryRun: false, quiet: true)
+        } catch {
+            FileHandle.standardError.write("  failed: \(error)\n".data(using: .utf8)!)
+        }
+    }
+
+    /// Re-runs a tick that landed mid-apply. Single-flight, like `retryWork`.
+    var deferredTick: DispatchWorkItem?
+
     func tick() {
+        // Guarded here rather than in advance(): draining the run loop lets the tick Timer
+        // fire mid-apply, and ensurePlaylist() would then swap `playlist` out from under
+        // the apply still running - persisting a fresh playlist's index for the image the
+        // old one produced.
+        //
+        // Deferred, not dropped. `ensurePlaylist` is the only caller of `scheduleRetry`, so
+        // returning outright would end the backoff chain that keeps retrying an unavailable
+        // playlist directory - one retry landing inside a read-back and the folder is never
+        // looked at again. On the main path it would silently eat a tick whenever an apply
+        // overruns the interval, which is what the short interval in the test recipe does.
+        guard !applying else {
+            print("[\(timestamp())] tick deferred: previous apply still running")
+            deferredTick?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.tick() }
+            deferredTick = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+            return
+        }
         reloadConfigIfChanged()
         guard ensurePlaylist() != nil else { return }
         advance()
     }
 
     func advance() {
-        guard var pl = playlist else { return }
-        let image = pl.next()
-        defer { playlist = pl }
+        guard playlist != nil else { return }
+        // Held across the whole of advance(), not just the apply: the playlist entry is
+        // consumed here, and consuming it must be inside the same guarded window that the
+        // apply is, or a re-entrant tick could take a second entry.
+        applying = true
+        defer { applying = false }
+        // Mutated in place, not through a local copy written back on exit: `playlist` can
+        // be set to nil while this is running (reloadConfigIfChanged does exactly that when
+        // the directory changes), and a deferred write-back would resurrect the stale copy
+        // still pointing at the old folder.
+        let image = playlist!.next()
         // After next(), index is the 1-based position of the item just returned; reading
         // it before misreports the wraparound tick.
-        let position = "\(pl.index)/\(pl.order.count)"
+        let position = "\(playlist!.index)/\(playlist!.order.count)"
         current = image
         print("[\(timestamp())] \(position)  \(image.lastPathComponent)")
 
@@ -626,14 +674,14 @@ final class Cycler {
             try? StateStore.save(state)
         }
 
-        do {
-            try applyOnce(image: image, layout: layout, dryRun: false, quiet: true)
-        } catch {
-            FileHandle.standardError.write("  failed: \(error)\n".data(using: .utf8)!)
-        }
-        // Persist even if applying failed, so a transient failure cannot replay the image.
-        pl.persist(into: &state)
-        try? StateStore.save(state)
+        apply(image, layout: layout)
+        // Reload rather than reusing the copy from before the apply: the run loop turned
+        // in between, so that copy may be stale.
+        var after = StateStore.load()
+        // Optional-chained rather than forced: the playlist can be cleared mid-apply, and
+        // persisting the old position would write an index for a directory we have left.
+        playlist?.persist(into: &after)
+        try? StateStore.save(after)
     }
 
     /// Display arrangement changed: re-render the *current* image for the new layout
@@ -642,14 +690,19 @@ final class Cycler {
         debounce?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            // The main-queue drain inside an apply's read-back runs this block, so it can
+            // land mid-apply. Re-arm rather than proceed: re-rendering now would set new
+            // URLs on screens the running apply is still polling the read-back for, and it
+            // would fail on the ones we replaced. Re-arm rather than skip, too - the
+            // arrangement really did change, and dropping it leaves the desktop rendered
+            // for the old one until the next tick.
+            guard !self.applying else { self.layoutChanged(); return }
             guard let newLayout = try? PhysicalLayoutStore.current() else { return }
             guard newLayout.fingerprint != self.layout.fingerprint else { return }
             self.layout = newLayout
             print("[\(timestamp())] display arrangement changed -> "
                   + "union \(Int(newLayout.unionMM.width))x\(Int(newLayout.unionMM.height))mm, re-rendering")
-            if let img = self.current {
-                try? applyOnce(image: img, layout: newLayout, dryRun: false, quiet: true)
-            }
+            if let img = self.current { self.apply(img, layout: newLayout) }
         }
         debounce = work
         // Reconfiguration fires repeatedly per change; settle before reacting.
