@@ -12,5 +12,9 @@ let package = Package(
     targets: [
         .target(name: "WallspanCore"),
         .executableTarget(name: "wallspan", dependencies: ["WallspanCore"]),
+        // Depends on nothing on purpose: the app spawns the CLI and parses --json, so the
+        // two release separately. Named WallspanApp because `Wallspan` would collide with
+        // `wallspan` in .build on a case-insensitive volume.
+        .executableTarget(name: "WallspanApp"),
     ]
 )
