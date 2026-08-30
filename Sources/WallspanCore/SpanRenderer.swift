@@ -12,9 +12,8 @@ public struct RenderedScreen {
 /// Maps one source image across every display as a single continuous picture.
 ///
 /// The source is aspect-filled into the *physical* union of the panels' active areas and
-/// each panel samples the millimetre sub-rect it occupies; content falling in a bezel gap
-/// is rendered and discarded. The mm->source mapping is global, so continuity across a
-/// seam is exact in physical space even when panels differ in pixel density.
+/// each panel samples the mm sub-rect it occupies; content in a bezel gap is rendered and
+/// discarded. The mapping is global, so a seam is exact even across differing density.
 public enum SpanRenderer {
     static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 

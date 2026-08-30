@@ -34,7 +34,6 @@ public struct WallspanState: Codable {
     public var playlistDirectory: String?
     public var playlistOrder: [String]?
     public var playlistIndex: Int?
-    public var lastApplied: String?
 
     public init() {}
 }
@@ -54,17 +53,8 @@ public enum StateStore {
         try FileManager.default.createDirectory(at: renderDirectory, withIntermediateDirectories: true)
     }
 
-    public static func load() -> WallspanState {
-        guard let data = try? Data(contentsOf: stateURL),
-              let state = try? JSONDecoder().decode(WallspanState.self, from: data)
-        else { return WallspanState() }
-        return state
-    }
+    static let file = JSONFile<WallspanState>(url: StateStore.stateURL)
 
-    public static func save(_ state: WallspanState) throws {
-        try ensureDirectories()
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(state).write(to: stateURL, options: .atomic)
-    }
+    public static func load() -> WallspanState { file.load(default: WallspanState()) }
+    public static func save(_ state: WallspanState) throws { try file.save(state) }
 }
