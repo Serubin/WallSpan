@@ -11,13 +11,15 @@ import AppKit
 /// calibrated one with real bezel gaps, where a continuity premise would not hold.
 public enum MappingVerifier {
     /// Flattens a CGImage into tightly-packed RGBA8 for cheap random access.
-    static func pixels(_ image: CGImage) -> (data: [UInt8], width: Int, height: Int)? {
+    static func pixels(
+        _ image: CGImage, colorSpace: CGColorSpace = SpanRenderer.colorSpace
+    ) -> (data: [UInt8], width: Int, height: Int)? {
         let w = image.width, h = image.height
         var buf = [UInt8](repeating: 0, count: w * h * 4)
         let ok = buf.withUnsafeMutableBytes { raw -> Bool in
             guard let ctx = CGContext(
                 data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
-                bytesPerRow: w * 4, space: SpanRenderer.colorSpace,
+                bytesPerRow: w * 4, space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
             ) else { return false }
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
@@ -152,12 +154,15 @@ public enum MappingVerifier {
         source: CGImage, rendered: [RenderedScreen], layout: PhysicalLayout,
         samplesPerDisplay: Int = 4000, tolerance: Double = 26
     ) -> [Report] {
-        guard let src = pixels(source) else { return [] }
+        // Both sides must flatten through the SAME space, or every comparison picks up a
+        // conversion error and the verifier reports mismatches that are not geometry.
+        let space = SpanRenderer.renderSpace(for: source)
+        guard let src = pixels(source, colorSpace: space) else { return [] }
         let srcSize = CGSize(width: source.width, height: source.height)
         let placedMM = SpanRenderer.placement(source: srcSize, union: layout.unionMM)
 
         return rendered.compactMap { screen -> Report? in
-            guard let out = pixels(screen.image) else { return nil }
+            guard let out = pixels(screen.image, colorSpace: space) else { return nil }
             let draw = SpanRenderer.drawRect(
                 placedMM: placedMM, display: screen.display, placement: screen.placement
             )

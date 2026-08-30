@@ -36,11 +36,20 @@ public enum WallpaperApplier {
     /// Identity of a render: same source bytes + same physical arrangement => same
     /// directory. Hashes the PHYSICAL fingerprint, so a `layout nudge` invalidates it;
     /// the logical one would serve stale renders and make calibration look inert.
+    ///
+    /// `renderer` salts the hash with the renderer's own behaviour, which the source bytes
+    /// and the layout do not describe. Without it a wide-gamut wallpaper applied before
+    /// the colour-space change keeps its sRGB-clipped PNGs — `materialize` treats file
+    /// existence as a hit and never re-renders — so the fix would silently miss exactly
+    /// the images already in use. Bump it whenever a render's output changes for
+    /// unchanged inputs.
+    static let renderer = "v2-source-colour-space"
+
     public static func renderKey(source: URL, layout: PhysicalLayout) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: source.path)
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-        return sha256Hex("\(source.path)|\(mtime)|\(size)|\(layout.fingerprint)")
+        return sha256Hex("\(renderer)|\(source.path)|\(mtime)|\(size)|\(layout.fingerprint)")
     }
 
     /// Encodes to a sibling temp file and swaps it in, so a file that exists is complete.
