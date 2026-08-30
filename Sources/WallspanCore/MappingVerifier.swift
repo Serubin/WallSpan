@@ -11,6 +11,47 @@ import AppKit
 /// in every configuration, including a calibrated layout with real bezel gaps, where the
 /// seam is legitimately discontinuous and a continuity premise would not hold.
 public enum MappingVerifier {
+    /// Flattens a CGImage into tightly-packed RGBA8 for cheap random access.
+    static func pixels(_ image: CGImage) -> (data: [UInt8], width: Int, height: Int)? {
+        let w = image.width, h = image.height
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let ok = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(
+                data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                bytesPerRow: w * 4, space: SpanRenderer.colorSpace,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? (buf, w, h) : nil
+    }
+
+    /// A high-contrast pattern with detail everywhere. Real photographs are a poor
+    /// instrument: a smooth sky's interior gradient is near 0.4, so a one-pixel shift
+    /// changes nothing measurable.
+    public static func testPattern(size: CGSize) -> CGImage? {
+        let w = Int(size.width), h = Int(size.height)
+        guard w > 0, h > 0, let ctx = SpanRenderer.context(pixelWidth: w, pixelHeight: h)
+        else { return nil }
+        let c = CGPoint(x: w / 2, y: h / 2)
+        ctx.setLineWidth(3)
+        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        var r = 40
+        while r < max(w, h) {
+            ctx.addArc(center: c, radius: CGFloat(r), startAngle: 0, endAngle: .pi * 2, clockwise: false)
+            ctx.strokePath()
+            r += 40
+        }
+        ctx.setStrokeColor(CGColor(srgbRed: 0.1, green: 1, blue: 0.8, alpha: 1))
+        for k in stride(from: -h, through: w, by: 120) {
+            ctx.move(to: CGPoint(x: k, y: 0))
+            ctx.addLine(to: CGPoint(x: k + h, y: h))
+            ctx.strokePath()
+        }
+        return ctx.makeImage()
+    }
+
     public struct Report: CustomStringConvertible {
         public let display: String
         public let sampled: Int
@@ -84,7 +125,7 @@ public enum MappingVerifier {
         let density = layout.maxPxPerMM
         let size = CGSize(width: layout.unionMM.width * density,
                           height: layout.unionMM.height * density)
-        guard let pattern = SeamVerifier.testPattern(size: size) else { return nil }
+        guard let pattern = testPattern(size: size) else { return nil }
 
         var sweep: [SelfTestReport.Sample] = []
         for offset in range {
@@ -113,12 +154,12 @@ public enum MappingVerifier {
         source: CGImage, rendered: [RenderedScreen], layout: PhysicalLayout,
         samplesPerDisplay: Int = 4000, tolerance: Double = 26
     ) -> [Report] {
-        guard let src = SeamVerifier.pixels(source) else { return [] }
+        guard let src = pixels(source) else { return [] }
         let srcSize = CGSize(width: source.width, height: source.height)
         let placedMM = SpanRenderer.placement(source: srcSize, union: layout.unionMM)
 
         return rendered.compactMap { screen -> Report? in
-            guard let out = SeamVerifier.pixels(screen.image) else { return nil }
+            guard let out = pixels(screen.image) else { return nil }
             let draw = SpanRenderer.drawRect(
                 placedMM: placedMM, display: screen.display, placement: screen.placement
             )
