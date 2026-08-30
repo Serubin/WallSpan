@@ -636,6 +636,9 @@ final class Cycler {
 }
 
 var cycler: Cycler?
+/// Global so the lock outlives cmdCycle's frame. RunLoop.main.run() never returns, but a
+/// local would still leave ownership ambiguous.
+var cycleLock: InstanceLock?
 
 func reconfigCallback(_ display: CGDirectDisplayID, _ flags: CGDisplayChangeSummaryFlags, _ ctx: UnsafeMutableRawPointer?) {
     // Ignore the "about to change" half of each notification pair.
@@ -666,6 +669,13 @@ func cmdCycle() throws {
              or set it once and let the config drive it:
                wallspan config set --dir ~/Pictures/Backgrounds --interval 15m
         """)
+    }
+
+    // Held for the life of the process; released by the kernel if we die abnormally.
+    do {
+        cycleLock = try InstanceLock.acquire()
+    } catch {
+        fail("\(error)")
     }
 
     let layout = try PhysicalLayoutStore.current()

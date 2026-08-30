@@ -145,8 +145,8 @@ Needs only the Swift toolchain from Command Line Tools — no Xcode, no code sig
 - **Per-Space wallpaper.** macOS keeps a separate wallpaper per Space, and setting one only
   affects the Space you are currently on. Spaces you have previously customised keep their
   old wallpaper until you visit them.
-- **Run only one `cycle` at a time.** Two instances fight over the wallpaper and over the
-  saved playlist position. There is no locking yet.
+- **Only one `cycle` runs at a time.** A second one exits immediately naming the pid that
+  holds the lock, rather than fighting over the wallpaper and the saved playlist position.
 - **The render cache never evicts.** Every image-and-arrangement pair keeps full-size PNGs
   under `~/Library/Application Support/wallspan/rendered`, and rearranging displays
   re-renders under a new key. Safe to `rm -rf` at any time.
