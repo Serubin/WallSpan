@@ -17,10 +17,43 @@ public struct RenderedScreen {
 public enum SpanRenderer {
     static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
-    static func context(pixelWidth w: Int, pixelHeight h: Int) -> CGContext? {
+    /// The space a render should work in: the source's own when an 8-bit `noneSkipLast`
+    /// context will take it, else sRGB.
+    ///
+    /// Forcing sRGB clips a wide-gamut source on the way in. Every image in the author's
+    /// library is sRGB today, so this changes nothing visible now — it matters the first
+    /// time a Display P3 wallpaper is used.
+    ///
+    /// Two separate filters, both needed. `.rgb` is ours: an 8-bit `noneSkipLast` context
+    /// takes a grayscale space quite happily, and rendering a colour source into one would
+    /// silently throw the colour away. `accepts` is CoreGraphics': it refuses an
+    /// extended-range space at 8 bits, and ImageIO does hand those back for HDR sources.
+    ///
+    /// The second is probed rather than predicted because a refusal is otherwise invisible
+    /// until it is far too late — `context()` returns nil, `render`'s compactMap turns that
+    /// into an empty result, and `applyOnce` can only report it as "failed to encode PNG",
+    /// an encode error for what is really an unsupported profile. Asking CG up front also
+    /// keeps this and `MappingVerifier` from settling on different spaces.
+    public static func renderSpace(for source: CGImage) -> CGColorSpace {
+        guard let cs = source.colorSpace, cs.model == .rgb, accepts(cs) else { return colorSpace }
+        return cs
+    }
+
+    /// Whether an 8-bit `noneSkipLast` bitmap context will take this space. Size-independent,
+    /// so one pixel answers it.
+    private static func accepts(_ space: CGColorSpace) -> Bool {
+        CGContext(
+            data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 0,
+            space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) != nil
+    }
+
+    static func context(
+        pixelWidth w: Int, pixelHeight h: Int, colorSpace space: CGColorSpace = colorSpace
+    ) -> CGContext? {
         let ctx = CGContext(
             data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-            space: colorSpace,
+            space: space,
             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
         )
         ctx?.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
@@ -64,9 +97,11 @@ public enum SpanRenderer {
         let placedMM = placement(source: srcSize, union: layout.unionMM)
         let firstUUID = layout.entries.first?.placement.uuid
 
+        let space = renderSpace(for: source)
         return layout.entries.compactMap { entry in
             let (display, p) = (entry.display, entry.placement)
-            guard let ctx = context(pixelWidth: display.pixelWidth, pixelHeight: display.pixelHeight)
+            guard let ctx = context(pixelWidth: display.pixelWidth,
+                                    pixelHeight: display.pixelHeight, colorSpace: space)
             else { return nil }
             ctx.interpolationQuality = .high
 
