@@ -95,21 +95,24 @@ public struct PhysicalLayout {
         return min(1.0, covered / total)
     }
 
-    /// Horizontal gaps between panels that sit side by side, for `layout show`.
+    /// Gap to each panel's nearest right-hand neighbour, for `layout show`.
+    ///
+    /// Nearest only: every ordered pair also matches panels with a third between them,
+    /// reporting a whole panel's width as a "gap" — which breaks any caller that
+    /// maximises over the result.
     public var horizontalGaps: [(left: String, right: String, gapMM: CGFloat)] {
-        var out: [(String, String, CGFloat)] = []
-        for a in entries {
-            for b in entries where a.placement.uuid != b.placement.uuid {
-                // b is to the right of a, with vertical overlap worth speaking of.
-                let gap = b.placement.rectMM.minX - a.placement.rectMM.maxX
-                let overlap = min(a.placement.rectMM.maxY, b.placement.rectMM.maxY)
-                    - max(a.placement.rectMM.minY, b.placement.rectMM.minY)
-                if gap >= -0.01, overlap > 10 {
-                    out.append((a.placement.name, b.placement.name, gap))
-                }
-            }
+        entries.compactMap { a in
+            let ar = a.placement.rectMM
+            let neighbour = entries.filter { b in
+                guard b.placement.uuid != a.placement.uuid else { return false }
+                let br = b.placement.rectMM
+                let overlap = min(ar.maxY, br.maxY) - max(ar.minY, br.minY)
+                return br.minX - ar.maxX >= -0.01 && overlap > 10
+            }.min { $0.placement.rectMM.minX < $1.placement.rectMM.minX }
+
+            guard let b = neighbour else { return nil }
+            return (a.placement.name, b.placement.name, b.placement.rectMM.minX - ar.maxX)
         }
-        return out
     }
 }
 
@@ -172,16 +175,26 @@ public enum PhysicalLayoutStore {
             cursorX += size.width
         }
 
-        // Refine y until plan() would leave the arrangement untouched.
+        refineVertical(&cfg, from: layout)
+        return cfg
+    }
+
+    /// Refines placement y until `plan` would leave the arrangement untouched.
+    ///
+    /// `only`, when given, limits which placements may move, so a newly attached panel can
+    /// be solved without disturbing calibrated ones.
+    static func refineVertical(
+        _ cfg: inout LayoutConfig, from layout: Layout, only: Set<String>? = nil
+    ) {
         for _ in 0..<24 {
             let entries = layout.displays.compactMap { d -> (DisplayInfo, Placement)? in
                 guard let u = uuid(for: d.id), let p = cfg.placements[u] else { return nil }
                 return (d, p)
             }
-            guard let probe = try? PhysicalLayout(entries: entries) else { break }
-            let targets = DisplayArranger.plan(probe)
+            guard let probe = try? PhysicalLayout(entries: entries) else { return }
             var worst = 0.0
-            for t in targets {
+            for t in DisplayArranger.plan(probe) {
+                if let only, !only.contains(t.uuid) { continue }
                 let err = Double(t.requestedYDown - t.currentYDown)
                 guard var p = cfg.placements[t.uuid] else { continue }
                 let ptMM = DisplayArranger.ptPerMM(t.display, p)
@@ -190,9 +203,57 @@ public enum PhysicalLayoutStore {
                 cfg.placements[t.uuid] = p
                 worst = max(worst, abs(err))
             }
-            if worst < 0.25 { break }
+            if worst < 0.25 { return }
         }
-        return cfg
+    }
+
+    /// Places a newly attached display alongside the placements already calibrated.
+    ///
+    /// Re-seeding would repack every panel from the origin using raw EDID sizes, throwing
+    /// the calibration away and often landing the newcomer on top of an existing panel.
+    /// Instead butt it against its nearest already-placed neighbour in logical
+    /// left-to-right order and shift the panels beyond it by its width, so every gap
+    /// already measured between existing panels survives.
+    static func insert(
+        _ d: DisplayInfo, uuid newUUID: String, into cfg: inout LayoutConfig, from layout: Layout
+    ) {
+        let size = edidSizeMM(for: d.id)
+        let ordered = layout.displays.sorted { $0.frame.minX < $1.frame.minX }
+        let idx = ordered.firstIndex { $0.id == d.id } ?? 0
+        func placement(_ x: DisplayInfo) -> Placement? {
+            uuid(for: x.id).flatMap { cfg.placements[$0] }
+        }
+        let left = ordered[..<idx].reversed().compactMap(placement).first
+        let right = ordered[(idx + 1)...].compactMap(placement).first
+
+        var origin = CGPoint(x: 0, y: 0)
+        if let left {
+            origin.x = left.rectMM.maxX
+            for other in ordered[(idx + 1)...] {
+                guard let u = uuid(for: other.id), var p = cfg.placements[u] else { continue }
+                p.originMM.x += size.width
+                cfg.placements[u] = p
+            }
+        } else if let right {
+            origin.x = right.originMM.x - size.width
+        }
+
+        // Start y from an already-placed panel through the logical arrangement; the fixed
+        // point below then corrects for the density difference between the two.
+        if let ref = layout.displays.first(where: { placement($0) != nil }),
+           let refP = placement(ref) {
+            let refPtMM = DisplayArranger.ptPerMM(ref, refP)
+            if refPtMM > 0 {
+                let dy = Double(CGDisplayBounds(d.id).origin.y - CGDisplayBounds(ref.id).origin.y)
+                let topMM = Double(refP.originMM.y + refP.sizeMM.height) - dy / refPtMM
+                origin.y = CGFloat(topMM) - size.height
+            }
+        }
+
+        cfg.placements[newUUID] = Placement(
+            uuid: newUUID, name: d.name, originMM: origin, sizeMM: size
+        )
+        refineVertical(&cfg, from: layout, only: [newUUID])
     }
 
     /// Builds the layout for the displays attached now, seeding any the config has never
@@ -200,20 +261,35 @@ public enum PhysicalLayoutStore {
     public static func current() throws -> PhysicalLayout {
         let logical = try Layout.current()
         var cfg = load()
-        var dirty = false
 
-        var entries: [(DisplayInfo, Placement)] = []
+        var ids: [(display: DisplayInfo, uuid: String)] = []
         for d in logical.displays {
-            guard let uuid = uuid(for: d.id) else { throw PhysicalLayoutError.noUUID(d.name) }
-            if let existing = cfg.placements[uuid] {
-                entries.append((d, existing))
-            } else {
-                let seeded = try seed(from: logical)
-                guard let p = seeded.placements[uuid] else { throw PhysicalLayoutError.noUUID(d.name) }
-                cfg.placements[uuid] = p
-                dirty = true
-                entries.append((d, p))
+            guard let u = uuid(for: d.id) else { throw PhysicalLayoutError.noUUID(d.name) }
+            ids.append((d, u))
+        }
+
+        var dirty = false
+        if ids.allSatisfy({ cfg.placements[$0.uuid] == nil }) {
+            // Nothing calibrated for anything attached, so a full seed is the baseline.
+            // Merged per UUID, never assigned over `cfg`: seed only describes the attached
+            // displays, so replacing the config would drop every detached display's
+            // calibration and then persist that loss.
+            let seeded = try seed(from: logical)
+            for (d, u) in ids {
+                guard let p = seeded.placements[u] else { throw PhysicalLayoutError.noUUID(d.name) }
+                cfg.placements[u] = p
             }
+            dirty = true
+        } else {
+            for (d, u) in ids where cfg.placements[u] == nil {
+                insert(d, uuid: u, into: &cfg, from: logical)
+                dirty = true
+            }
+        }
+
+        let entries = try ids.map { (d, u) -> (DisplayInfo, Placement) in
+            guard let p = cfg.placements[u] else { throw PhysicalLayoutError.noUUID(d.name) }
+            return (d, p)
         }
         if dirty { try? save(cfg) }
         return try PhysicalLayout(entries: entries)
