@@ -401,12 +401,18 @@ func cmdCalibrate() throws {
     let src = dir.appendingPathComponent("pattern-\(layout.fingerprint.prefix(12)).png")
     try WallpaperApplier.writePNG(pattern, to: src)
 
-    var state = StateStore.load()
-    snapshotOriginalIfNeeded(&state)
-    try StateStore.save(state)
-
     print("calibration pattern (\(pattern.width)x\(pattern.height))")
-    try applyOnce(image: src, layout: layout, dryRun: false)
+    // --dry-run leaves the desktop alone, so the pattern and crops can be inspected
+    // without first losing whatever is on screen.
+    let dryRun = args.has("dry-run")
+    if dryRun {
+        print("  source -> \(src.path)")
+    } else {
+        var state = StateStore.load()
+        snapshotOriginalIfNeeded(&state)
+        try StateStore.save(state)
+    }
+    try applyOnce(image: src, layout: layout, dryRun: dryRun)
     for g in layout.horizontalGaps {
         print(String(format: "  current gap %@ | %@ = %.1f mm", g.left, g.right, g.gapMM))
     }
@@ -1007,8 +1013,9 @@ func usage() {
           System Settings. Horizontal is untouched - macOS forces displays to be
           contiguous and cannot represent a bezel gap at all.
 
-      wallspan calibrate
-          Apply a diagonal test pattern. Diagonals are the sensitive instrument:
+      wallspan calibrate [--dry-run]
+          Apply a diagonal test pattern. --dry-run renders it without
+          changing your desktop. Diagonals are the sensitive instrument:
           the eye spots a break in a straight line far below one pixel.
 
     CORRECTNESS
