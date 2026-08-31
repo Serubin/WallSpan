@@ -73,7 +73,7 @@ continuous.
 
 ```sh
 wallspan calibrate                                  # apply a test pattern
-wallspan layout nudge dell --dx 14mm --dy -3mm      # adjust
+wallspan layout nudge dell --dx 20px --dy -4px      # adjust
 wallspan calibrate                                  # look again
 wallspan layout show
 wallspan layout reset                               # start over, edge to edge
@@ -85,18 +85,30 @@ diagonals step **down-right** across the seam, the gap is too small; **up-right*
 large. The red horizontal rules isolate purely vertical error, and the 10 mm grid is an
 absolute reference you can check against a tape measure.
 
-### If the picture looks slightly stretched
+### Panel sizes, and why they need correcting
 
 macOS reports each panel's physical size from EDID, and monitors frequently report it
-wrong. `wallspan layout show` flags a panel whose numbers imply non-square pixels. Setting
-the true dimensions from the spec sheet is the single highest-value calibration input:
+wrong. One LG here claims 801.6 x 329.5 mm for a 3440x1440 panel - 109 PPI across but 111
+PPI down. No flat panel has non-square pixels, so at least one of those numbers is false.
+Left alone, a feature crossing the seam drifted 31 px.
+
+wallspan corrects this without asking. The per-axis figures are untrustworthy but the
+*diagonal* survives - EDID's base block stores size in whole centimetres, which moves each
+axis by up to 5 mm while barely moving the diagonal - so it keeps the diagonal and imposes
+the pixel aspect ratio, giving the one square-pixel rectangle that fits. Across panels from
+14" to 49" that drives anisotropy to zero every time and roughly halves the mean error,
+and where the reported size was already square it changes nothing.
+
+`wallspan layout show` says when it has corrected a panel, and what the panel claimed.
+
+What no amount of inference can find is a size wrong in *both* axes by the same
+proportion: that is a pure scale error and EDID looks entirely self-consistent. It shows up
+as circles that break across the seam while the diagonals line up. Dial it out by eye:
 
 ```sh
-wallspan layout size lg --width 797.22mm --height 333.72mm
+wallspan layout size lg --ppi 109.6      # or --scale 100.6
+wallspan layout size lg --width 797.22mm # if you have the spec sheet
 ```
-
-On the setup this was developed against, that cut the residual misalignment from ±19.5 pt
-to ±4.2 pt.
 
 ### Aligning the displays
 
