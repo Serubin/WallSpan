@@ -10,8 +10,9 @@ import AppKit
 /// space through the normal pipeline, so it is subject to the layout being calibrated.
 public enum CalibrationPattern {
     /// - Parameter unionMM: the physical union being calibrated.
+    /// - Parameter anchorMM: where the whole lattice is pinned — see `PhysicalLayout.anchorMM`.
     /// - Parameter pxPerMM: rasterisation density; the pattern is resolution-independent.
-    public static func make(unionMM: CGRect, pxPerMM: CGFloat) -> CGImage? {
+    public static func make(unionMM: CGRect, anchorMM: CGPoint, pxPerMM: CGFloat) -> CGImage? {
         let w = Int((unionMM.width * pxPerMM).rounded())
         let h = Int((unionMM.height * pxPerMM).rounded())
         guard w > 0, h > 0, let ctx = SpanRenderer.context(pixelWidth: w, pixelHeight: h)
@@ -22,9 +23,11 @@ public enum CalibrationPattern {
         func line(_ mm: CGFloat) -> CGFloat { max(1, mm * pxPerMM) }
         let slope = CGFloat(0.5774)   // tan(30 deg)
 
-        /// Parallel rules snapped to a multiple of `spacing`, so the grid is absolute.
+        /// Parallel rules phased on the anchor, so every spacing shares its lattice.
         func addRules(every spacing: CGFloat, vertical: Bool) {
-            var v = ((vertical ? unionMM.minX : unionMM.minY) / spacing).rounded(.down) * spacing
+            let a = vertical ? anchorMM.x : anchorMM.y
+            let lo = vertical ? unionMM.minX : unionMM.minY
+            var v = a + ((lo - a) / spacing).rounded(.down) * spacing
             let limit = vertical ? unionMM.maxX : unionMM.maxY
             while v <= limit {
                 if vertical {
@@ -57,17 +60,9 @@ public enum CalibrationPattern {
         let run = unionMM.height / slope
         let diagonalSpacing: CGFloat = 120
 
-        /// Where the diagonals cross and the rings are centred: the 50 mm multiple nearest
-        /// the union's middle, so the whole pattern shares the grid's lattice. The true
-        /// centre lands on no grid line, and moves as the panels being measured are nudged.
-        let anchor = CGPoint(
-            x: min(max((unionMM.midX / 50).rounded() * 50, unionMM.minX), unionMM.maxX),
-            y: min(max((unionMM.midY / 50).rounded() * 50, unionMM.minY), unionMM.maxY)
-        )
-
         /// Anchor height as a fraction of the union. The families share a `c` only at 0.5,
         /// hence the separate offsets below.
-        let anchorT = unionMM.height > 0 ? (anchor.y - unionMM.minY) / unionMM.height : 0.5
+        let anchorT = unionMM.height > 0 ? (anchorMM.y - unionMM.minY) / unionMM.height : 0.5
 
         /// One family of ~30-degree diagonals; `rising` picks which end carries the run.
         /// `c` is the x at the union's bottom edge, or its top edge when falling.
@@ -77,8 +72,8 @@ public enum CalibrationPattern {
 
             // Phased so one crossing lands on the anchor.
             let onAnchor = rising
-                ? anchor.x - anchorT * run
-                : anchor.x - (1 - anchorT) * run
+                ? anchorMM.x - anchorT * run
+                : anchorMM.x - (1 - anchorT) * run
             // Walk back to the first line that can still touch the union, keeping the phase.
             let back = ((onAnchor - (unionMM.minX - run)) / diagonalSpacing).rounded(.up)
             var c = onAnchor - back * diagonalSpacing
@@ -95,7 +90,7 @@ public enum CalibrationPattern {
         ctx.setFillColor(CGColor(srgbRed: 0.05, green: 0.06, blue: 0.09, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
 
-        // 10 mm grid, faint — gives an absolute scale reference across both panels.
+        // 10 mm grid, faint — gives a scale reference across both panels.
         grid(every: 10, width: 0.25, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.13))
 
         // 100 mm majors, brighter.
@@ -112,12 +107,15 @@ public enum CalibrationPattern {
               color: CGColor(srgbRed: 1, green: 0.35, blue: 0.45, alpha: 0.9))
 
         // Concentric rings on the anchor: a circle crossing a seam is unforgiving. 50 mm
-        // radii off a 50 mm anchor keep every ring meeting the rules and the grid.
+        // radii keep every ring meeting the rules and the grid.
         ctx.setLineWidth(line(0.9))
         ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.8))
-        let cx = mmX(anchor.x), cy = mmY(anchor.y)
+        let cx = mmX(anchorMM.x), cy = mmY(anchorMM.y)
+        // Reach the union's farthest corner; the anchor can sit well off its centre.
+        let reach = hypot(max(anchorMM.x - unionMM.minX, unionMM.maxX - anchorMM.x),
+                          max(anchorMM.y - unionMM.minY, unionMM.maxY - anchorMM.y))
         var r: CGFloat = 50
-        while r < max(unionMM.width, unionMM.height) {
+        while r < reach {
             ctx.addArc(center: CGPoint(x: cx, y: cy), radius: r * pxPerMM,
                        startAngle: 0, endAngle: .pi * 2, clockwise: false)
             ctx.strokePath()
