@@ -143,8 +143,9 @@ Needs only the Swift toolchain from Command Line Tools — no Xcode, no code sig
 ## Known limits
 
 - **Per-Space wallpaper.** macOS keeps a separate wallpaper per Space, and setting one only
-  affects the Space you are currently on. Spaces you have previously customised keep their
-  old wallpaper until you visit them.
+  affects the Space you are currently on. `cycle` works around this by re-applying the
+  current image whenever you switch Spaces, so each Space catches up on arrival — but a
+  one-shot `wallspan apply` exits and cannot, so it reaches only the Space you ran it from.
 - **Only one `cycle` runs at a time.** A second one exits immediately naming the pid that
   holds the lock, rather than fighting over the wallpaper and the saved playlist position.
 - **The render cache never evicts.** Every image-and-arrangement pair keeps full-size PNGs
