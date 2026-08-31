@@ -54,17 +54,40 @@ public enum CalibrationPattern {
             ctx.strokePath()
         }
 
+        let run = unionMM.height / slope
+        let diagonalSpacing: CGFloat = 120
+
+        /// Where the diagonals cross and the rings are centred: the 50 mm multiple nearest
+        /// the union's middle, so the whole pattern shares the grid's lattice. The true
+        /// centre lands on no grid line, and moves as the panels being measured are nudged.
+        let anchor = CGPoint(
+            x: min(max((unionMM.midX / 50).rounded() * 50, unionMM.minX), unionMM.maxX),
+            y: min(max((unionMM.midY / 50).rounded() * 50, unionMM.minY), unionMM.maxY)
+        )
+
+        /// Anchor height as a fraction of the union. The families share a `c` only at 0.5,
+        /// hence the separate offsets below.
+        let anchorT = unionMM.height > 0 ? (anchor.y - unionMM.minY) / unionMM.height : 0.5
+
         /// One family of ~30-degree diagonals; `rising` picks which end carries the run.
+        /// `c` is the x at the union's bottom edge, or its top edge when falling.
         func diagonals(rising: Bool, width: CGFloat, color: CGColor) {
             ctx.setLineWidth(line(width))
             ctx.setStrokeColor(color)
-            let run = unionMM.height / slope
-            var c = unionMM.minX - run
-            while c <= unionMM.maxX + unionMM.height {
+
+            // Phased so one crossing lands on the anchor.
+            let onAnchor = rising
+                ? anchor.x - anchorT * run
+                : anchor.x - (1 - anchorT) * run
+            // Walk back to the first line that can still touch the union, keeping the phase.
+            let back = ((onAnchor - (unionMM.minX - run)) / diagonalSpacing).rounded(.up)
+            var c = onAnchor - back * diagonalSpacing
+
+            while c <= unionMM.maxX {
                 let (bottom, top) = rising ? (c, c + run) : (c + run, c)
                 ctx.move(to: CGPoint(x: mmX(bottom), y: mmY(unionMM.minY)))
                 ctx.addLine(to: CGPoint(x: mmX(top), y: mmY(unionMM.maxY)))
-                c += 120
+                c += diagonalSpacing
             }
             ctx.strokePath()
         }
@@ -88,10 +111,11 @@ public enum CalibrationPattern {
         rules(every: 50, vertical: false, width: 1.0,
               color: CGColor(srgbRed: 1, green: 0.35, blue: 0.45, alpha: 0.9))
 
-        // Concentric rings centred on the union: a circle crossing a seam is unforgiving.
+        // Concentric rings on the anchor: a circle crossing a seam is unforgiving. 50 mm
+        // radii off a 50 mm anchor keep every ring meeting the rules and the grid.
         ctx.setLineWidth(line(0.9))
         ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.8))
-        let cx = mmX(unionMM.midX), cy = mmY(unionMM.midY)
+        let cx = mmX(anchor.x), cy = mmY(anchor.y)
         var r: CGFloat = 50
         while r < max(unionMM.width, unionMM.height) {
             ctx.addArc(center: CGPoint(x: cx, y: cy), radius: r * pxPerMM,
