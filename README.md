@@ -24,6 +24,19 @@ wallspan cycle ~/Pictures/Backgrounds --interval 15m
 wallspan restore                               # back to your previous wallpaper
 ```
 
+Once something is cycling, drive it without stopping it:
+
+```sh
+wallspan status                                # what is on screen, and what is next
+wallspan next                                  # change now
+wallspan pause                                 # stop changing; the setting sticks
+wallspan resume
+```
+
+`pause` is a setting rather than a signal, so it survives a reboot and the agent
+restarting. `next` works while paused and leaves it paused: pausing stops the schedule,
+not the button.
+
 `apply` saves your existing wallpaper the first time it runs, so `restore` always returns
 to what you had before wallspan, not to whatever it set most recently.
 

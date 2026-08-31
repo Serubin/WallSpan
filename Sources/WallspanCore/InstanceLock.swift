@@ -67,6 +67,26 @@ public final class InstanceLock {
         return InstanceLock(fd: fd, path: path)
     }
 
+    /// The pid of whatever is cycling, or nil. Probes the lock rather than trusting the
+    /// recorded pid, so a stale file reads as nobody and a recycled pid cannot pose as live.
+    /// Covers a foreground `cycle` too, which `launchctl print` does not.
+    public static func holder(at path: URL = defaultPath) -> pid_t? {
+        let fd = open(path.path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        // Acquiring it means it was free. Release immediately — this is a probe, and holding
+        // it would lock out the very process the caller is asking about.
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            flock(fd, LOCK_UN)
+            return nil
+        }
+        let text = (try? String(contentsOf: path, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // Held, but the pid is advisory and may be unreadable; -1 still says "held".
+        return pid_t(text) ?? -1
+    }
+
     /// Releasing on deinit covers the normal exits; the kernel covers the abnormal ones.
     deinit {
         flock(fd, LOCK_UN)
