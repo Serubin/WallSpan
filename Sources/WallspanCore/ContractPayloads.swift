@@ -49,6 +49,9 @@ extension Contract {
         /// EDID implies non-square pixels, so `layout size` is worth running. The same
         /// condition `layout show` flags in prose.
         public var densitySuspect: Bool
+        /// What the panel itself claims, which is not always what `sizeMM` holds: sizes are
+        /// corrected to square pixels on the way in. Shown so the correction is overrulable.
+        public var reportedSizeMM: [Double]
 
         init(display d: DisplayInfo, placement p: Placement) {
             let dx = Double(CGFloat(d.pixelWidth) / p.sizeMM.width)
@@ -64,6 +67,8 @@ extension Contract {
             pxPerMMX = dx
             pxPerMMY = dy
             densitySuspect = abs(dx - dy) > 0.02
+            let reported = PhysicalLayoutStore.edidSizeMM(for: d.id)
+            reportedSizeMM = [Double(reported.width), Double(reported.height)]
         }
     }
 
