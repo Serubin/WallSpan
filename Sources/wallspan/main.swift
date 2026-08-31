@@ -434,7 +434,7 @@ func cmdArrange(_ layout: PhysicalLayout) throws {
 func cmdCalibrate() throws {
     let layout = try PhysicalLayoutStore.current()
     guard let pattern = CalibrationPattern.make(
-        unionMM: layout.unionMM, pxPerMM: layout.maxPxPerMM
+        unionMM: layout.unionMM, anchorMM: layout.anchorMM, pxPerMM: layout.maxPxPerMM
     ) else { fail("could not build calibration pattern") }
 
     let dir = StateStore.renderDirectory.appendingPathComponent("calibration", isDirectory: true)
@@ -443,6 +443,7 @@ func cmdCalibrate() throws {
     try WallpaperApplier.writePNG(pattern, to: src)
 
     print("calibration pattern (\(pattern.width)x\(pattern.height))")
+    print("  anchored on \(layout.anchorDisplay.display.name)")
     // --dry-run leaves the desktop alone, so the pattern and crops can be inspected
     // without first losing whatever is on screen.
     let dryRun = args.has("dry-run")
@@ -463,7 +464,9 @@ func cmdCalibrate() throws {
       - yellow/green DIAGONALS should stay collinear. A break means the gap is wrong.
         Lines stepping DOWN-right => gap too small. Stepping UP-right => too large.
       - red HORIZONTAL rules isolate vertical error; they should not step.
-      - the 10mm grid is an absolute reference you can check with a tape measure.
+      - the 10mm grid is a scale reference you can check with a tape measure.
+      - the bullseye marks the centre of the main display and holds still while you
+        nudge the others. It moves only if you change which display macOS calls main.
 
     Adjust, then re-run:
       wallspan layout nudge <display> --dx 14mm --dy -3mm
@@ -1061,9 +1064,11 @@ func usage() {
           contiguous and cannot represent a bezel gap at all.
 
       wallspan calibrate [--dry-run]
-          Apply a diagonal test pattern. --dry-run renders it without
-          changing your desktop. Diagonals are the sensitive instrument:
-          the eye spots a break in a straight line far below one pixel.
+          Apply a diagonal test pattern, pinned to the centre of the main
+          display so it holds still while you move the others. --dry-run
+          renders it without changing your desktop. Diagonals are the
+          sensitive instrument: the eye spots a break in a straight line
+          far below one pixel.
 
     CORRECTNESS
       wallspan verify-mapping <image|directory>

@@ -82,8 +82,11 @@ wallspan layout reset                               # start over, edge to edge
 Calibrate by eye against the long diagonals in the test pattern. Your eye is extremely
 good at spotting a break in a straight line — far better than judging a gap width. If the
 diagonals step **down-right** across the seam, the gap is too small; **up-right** means too
-large. The red horizontal rules isolate purely vertical error, and the 10 mm grid is an
-absolute reference you can check against a tape measure.
+large. The red horizontal rules isolate purely vertical error, and the 10 mm grid is a
+scale reference you can check against a tape measure.
+
+The whole lattice is pinned to the centre of your main display, so the bullseye and the
+diagonal crossing on it stay put while you move the other panels around them.
 
 ### Panel sizes, and why they need correcting
 

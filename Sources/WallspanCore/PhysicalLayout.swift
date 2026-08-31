@@ -107,6 +107,20 @@ public struct PhysicalLayout {
         }.max() ?? 1
     }
 
+    /// The reference panel: the main display, or the first in the set when macOS's main
+    /// display is not one of these.
+    public var anchorDisplay: (display: DisplayInfo, placement: Placement) {
+        entries.first { $0.display.id == CGMainDisplayID() } ?? entries[0]
+    }
+
+    /// Centre of `anchorDisplay`, in millimetres. Calibration holds the main display still
+    /// and moves the others around it, so anything pinned here stays put on the one panel
+    /// the eye is using as the reference.
+    public var anchorMM: CGPoint {
+        let r = anchorDisplay.placement.rectMM
+        return CGPoint(x: r.midX, y: r.midY)
+    }
+
     /// Covers placements, not just logical frames, so nudging a gap invalidates the
     /// render cache instead of making calibration appear inert.
     public var fingerprint: String {
