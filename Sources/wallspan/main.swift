@@ -527,6 +527,10 @@ final class Cycler {
     /// path that applies goes through `apply(_:layout:)` to hold it, or two applies
     /// interleave on the same screens.
     var applying = false
+    /// Separate from `debounce`, or a display change would cancel a pending Space follow.
+    var spaceDebounce: DispatchWorkItem?
+    /// Spaces get switched dozens of times an hour; log the follow once per image.
+    var spaceFollowLogged = false
 
     init(layout: PhysicalLayout, config: CycleConfig, overrides: CycleOverrides) {
         self.layout = layout
@@ -669,6 +673,7 @@ final class Cycler {
         // it before misreports the wraparound tick.
         let position = "\(playlist!.index)/\(playlist!.order.count)"
         current = image
+        spaceFollowLogged = false
         print("[\(timestamp())] \(position)  \(image.lastPathComponent)")
 
         // Snapshot BEFORE applying, and persist before the desktop changes:
@@ -715,6 +720,28 @@ final class Cycler {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
     }
 
+    /// Re-applies the current image on arrival at a Space: `setDesktopImageURL` only ever
+    /// reached whichever Space was in front at the last tick. Unconditional, because
+    /// `desktopImageURL(for:)` reports one path for every Space and cannot show staleness.
+    func spaceChanged() {
+        spaceDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Re-arm, not skip: the Space we arrived on still needs the image.
+            guard !self.applying else { self.spaceChanged(); return }
+            guard let img = self.current else { return }
+            if !self.spaceFollowLogged {
+                self.spaceFollowLogged = true
+                print("[\(timestamp())] space changed -> \(img.lastPathComponent)"
+                      + " (further switches on this image are silent)")
+            }
+            self.apply(img, layout: self.layout)
+        }
+        spaceDebounce = work
+        // Outlasts the switch animation, and collapses a swipe across several Spaces.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
     func timestamp() -> String {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
@@ -731,6 +758,20 @@ func reconfigCallback(_ display: CGDirectDisplayID, _ flags: CGDisplayChangeSumm
     // Ignore the "about to change" half of each notification pair.
     guard !flags.contains(.beginConfigurationFlag) else { return }
     cycler?.layoutChanged()
+}
+
+/// Subscribes `cycle` to Space switches; the caller must then run `NSApplication`, since
+/// the notification was measured to arrive only under AppKit's loop, never under
+/// `RunLoop.main.run()`. False without a GUI session, where `NSApplication` would abort.
+func startFollowingSpaces() -> Bool {
+    guard CGSessionCopyCurrentDictionary() != nil else { return false }
+    let app = NSApplication.shared
+    // The policy the notification was measured under; the default `.prohibited` refuses.
+    app.setActivationPolicy(.accessory)
+    NSWorkspace.shared.notificationCenter.addObserver(
+        forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+    ) { _ in cycler?.spaceChanged() }
+    return true
 }
 
 func cmdCycle() throws {
@@ -775,6 +816,10 @@ func cmdCycle() throws {
           + (overrides.intervalSeconds == nil
              ? "  (from \(ConfigStore.url.lastPathComponent); re-read each tick)"
              : "  (--interval overrides config)"))
+    let followsSpaces = startFollowingSpaces()
+    print(followsSpaces
+          ? "following Space changes: each Space gets the current wallpaper on arrival"
+          : "not a GUI session: Space changes will not be followed")
     print("ctrl-c to stop; run `wallspan restore` to put your old wallpaper back\n")
 
     c.tick()
@@ -790,7 +835,8 @@ func cmdCycle() throws {
     sigint.resume()
     signal(SIGINT, SIG_IGN)
 
-    RunLoop.main.run()
+    // Both service the same RunLoop.main sources; only AppKit's delivers the notification.
+    if followsSpaces { NSApplication.shared.run() } else { RunLoop.main.run() }
 }
 
 // MARK: - config + agent
