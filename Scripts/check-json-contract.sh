@@ -1,0 +1,112 @@
+#!/bin/bash
+# Every --json command must emit one parseable envelope; every other must refuse the flag.
+# An `error` envelope passes — a runner has no display, so shape is what is asserted.
+#
+# usage: Scripts/check-json-contract.sh [path-to-wallspan]
+set -uo pipefail
+
+BIN="${1:-.build/debug/wallspan}"
+[ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 1; }
+BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
+
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH"' EXIT
+export CFFIXED_USER_HOME="$SCRATCH" HOME="$SCRATCH"
+
+fails=0
+
+# One envelope, carrying `schema` and either the expected key or `error`.
+expect_envelope() {
+    local key="$1"; shift
+    local out rc
+    out="$("$BIN" "$@" --json 2>/dev/null)"; rc=$?
+    if printf '%s' "$out" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+assert isinstance(d, dict), "not an object"
+assert d.get("schema", 0) >= 1, "missing or bad schema"
+key = sys.argv[1]
+assert key in d or "error" in d, f"neither {key!r} nor error present: {sorted(d)}"
+if "error" in d:
+    assert set(d["error"]) >= {"code", "message"}, "malformed error"
+' "$key" 2>/dev/null; then
+        local kind
+        kind=$(printf '%s' "$out" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("error:"+d["error"]["code"] if "error" in d else "ok")')
+        echo "  ok        $* --json  -> $kind"
+    else
+        echo "  FAIL      $* --json  (exit $rc)"
+        printf '%s\n' "$out" | head -5 | sed 's/^/            /'
+        fails=$((fails + 1))
+    fi
+}
+
+# Refused, but still as an envelope.
+expect_refused() {
+    local out rc
+    out="$("$BIN" "$@" --json 2>/dev/null)"; rc=$?
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" \
+        | python3 -c 'import sys,json;assert json.load(sys.stdin)["error"]["code"]' 2>/dev/null; then
+        echo "  ok        $* --json  -> refused"
+    else
+        echo "  FAIL      $* --json  should have been refused (exit $rc)"
+        fails=$((fails + 1))
+    fi
+}
+
+echo "read-only:"
+expect_envelope version   version
+expect_envelope layout    info
+expect_envelope layout    layout show
+expect_envelope sets      layout list
+expect_envelope config    config show
+expect_envelope agent     agent status
+expect_envelope arrange   layout arrange --dry-run
+expect_envelope applied   apply /nonexistent.jpg
+# Error paths too: a caller cannot branch on a code it cannot parse.
+expect_envelope layout    layout nudge nosuchdisplay --dx 1px
+expect_envelope layout    layout nudge 0 --dx 20in
+
+# `calibrate` is absent on purpose: the redirect does not cover the desktop, so it would
+# put a test pattern on the real screens.
+
+echo "refused:"
+expect_refused cycle
+expect_refused selftest
+expect_refused preview
+expect_refused verify-mapping
+expect_refused bogus-subcommand
+
+# Only once the redirect is proven, never assumed.
+reported="$("$BIN" config show --json 2>/dev/null \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin).get("config",{}).get("configPath",""))' 2>/dev/null)"
+
+case "$reported" in
+    "$SCRATCH"/*)
+        echo "mutating (isolated in $SCRATCH):"
+        expect_envelope layout    layout reset
+        # Every mutating layout verb, because each prints its own prose before emitting and
+        # a stray line ahead of the object makes the whole reply unparseable.
+        # Every mutating verb: two of these once leaked prose ahead of the object.
+        expect_envelope layout    layout nudge 0 --dx 1px
+        expect_envelope layout    layout nudge 0 --dy -1px
+        expect_envelope layout    layout set 0 --origin-x 0mm
+        expect_envelope layout    layout size 0 --scale 100.1
+        expect_envelope layout    layout size 0 --ppi 109.5
+        expect_envelope layout    layout size 0 --width 800mm
+        # Zero deltas on a fresh seed, so this reports rather than moves.
+        expect_envelope arrange   layout arrange
+        expect_envelope arrange   layout arrange --revert
+        expect_envelope config    config set --interval 30m
+        expect_envelope restored  restore
+        ;;
+    *)
+        echo "mutating: SKIPPED — no redirect (reported '${reported:-unknown}'); these" >&2
+        echo "          would rewrite the real config and wallpaper." >&2
+        ;;
+esac
+
+if [ "$fails" -gt 0 ]; then
+    echo "$fails contract check(s) failed" >&2
+    exit 1
+fi
+echo "json contract ok"

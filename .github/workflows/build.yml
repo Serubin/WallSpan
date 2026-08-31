@@ -68,6 +68,12 @@ jobs:
             grep -q '^error: ' <<<"$out"
           fi
 
+      - name: Check the --json contract
+        # The contract is what the menu bar app parses, and the app is released on its own
+        # schedule - so a field quietly dropped here is only found by a user whose app
+        # stops working. Shape is asserted, not values: a runner has no display.
+        run: Scripts/check-json-contract.sh '${{ steps.bin.outputs.path }}'
+
       - name: Package
         id: pkg
         run: |

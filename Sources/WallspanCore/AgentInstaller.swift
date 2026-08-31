@@ -145,6 +145,22 @@ public enum AgentInstaller {
         return InstallResult(stagedBinary: staged, plist: plist, pid: pid)
     }
 
+    /// The binary the installed plist actually launches, or nil if nothing is installed.
+    ///
+    /// Read from the plist rather than from `launchctl print`, so it answers for an agent
+    /// that is installed but not currently loaded — which is exactly the state a caller
+    /// checking for a stale or moved binary needs to see.
+    public static func installedProgram(label: String) -> URL? {
+        guard let data = try? Data(contentsOf: plistURL(label: label)),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data, options: [], format: nil
+              ) as? [String: Any],
+              let argv = plist["ProgramArguments"] as? [String],
+              let program = argv.first
+        else { return nil }
+        return URL(fileURLWithPath: program)
+    }
+
     public static func pid(label: String) -> Int? {
         guard let out = try? run(["print", "\(domain)/\(label)"]), out.status == 0 else { return nil }
         for line in out.output.split(separator: "\n") {

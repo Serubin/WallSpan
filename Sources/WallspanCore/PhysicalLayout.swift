@@ -155,7 +155,11 @@ public struct PhysicalLayout {
     /// Gap to each panel's nearest right-hand neighbour, for `layout show`. Nearest only:
     /// every ordered pair also matches panels with a third between them, reporting a whole
     /// panel's width as a gap and inflating `maxGapMM`.
-    public var horizontalGaps: [(left: String, right: String, gapMM: CGFloat)] {
+    /// UUIDs alongside the names because two identical monitors carry the same
+    /// `localizedName` while being distinct panels — a caller mapping a gap back to
+    /// something it can nudge needs the identifier, not the label.
+    public var horizontalGaps:
+        [(left: String, right: String, leftUUID: String, rightUUID: String, gapMM: CGFloat)] {
         entries.compactMap { a in
             let ar = a.placement.rectMM
             let neighbour = entries.filter { b in
@@ -166,7 +170,9 @@ public struct PhysicalLayout {
             }.min { $0.placement.rectMM.minX < $1.placement.rectMM.minX }
 
             guard let b = neighbour else { return nil }
-            return (a.placement.name, b.placement.name, b.placement.rectMM.minX - ar.maxX)
+            return (a.placement.name, b.placement.name,
+                    a.placement.uuid, b.placement.uuid,
+                    b.placement.rectMM.minX - ar.maxX)
         }
     }
 }
@@ -447,6 +453,10 @@ public enum PhysicalLayoutStore {
 
     /// Resolves "0", "dell", "LG ULTRAGEAR" to one attached display.
     public static func resolve(_ query: String, in layout: PhysicalLayout) throws -> String {
+        // UUID first, and exactly: it is what a front-end holds, and it is the only form
+        // that cannot be ambiguous. Two identical monitors share a name, so a UI resolving
+        // through the name substring below could silently nudge the wrong panel.
+        if layout.entries.contains(where: { $0.placement.uuid == query }) { return query }
         if let idx = Int(query), idx >= 0, idx < layout.entries.count {
             return layout.entries[idx].placement.uuid
         }

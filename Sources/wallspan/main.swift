@@ -22,7 +22,7 @@ struct Args {
     /// every new option and silently drops the value when it is not. Booleans are stable.
     static let booleanFlags: Set<String> = [
         "dry-run", "sequential", "shuffle", "recursive", "no-recursive",
-        "revert", "purge", "help", "h",
+        "revert", "purge", "help", "h", "json",
     ]
 
     init(_ argv: [String]) {
@@ -68,9 +68,69 @@ struct Args {
     }
 }
 
-func fail(_ message: String) -> Never {
-    FileHandle.standardError.write("error: \(message)\n".data(using: .utf8)!)
+/// Read straight from argv rather than from `args`, because `Args.init` itself calls
+/// `fail` — a rejected `--dry-run=true` has to come back as JSON too when a front-end
+/// asked for JSON.
+let jsonMode = CommandLine.arguments.contains("--json")
+
+/// Shadows Swift's `print`: under `--json` one stray line ruins the object being parsed.
+/// Guarding each call site was tried first and leaked twice, so the default is safe now.
+func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+    guard !jsonMode else { return }
+    let text = items.map { "\($0)" }.joined(separator: separator) + terminator
+    FileHandle.standardOutput.write(Data(text.utf8))
+}
+
+/// The deliberate way past the shadow above, for the one object a caller wants.
+func emitRaw(_ text: String) {
+    FileHandle.standardOutput.write(Data((text + "\n").utf8))
+}
+
+func fail(_ message: String, code: JSONOutput.ErrorCode = .badArgument) -> Never {
+    if jsonMode {
+        // stdout, not stderr: one stream to read, and the exit status still says it failed.
+        emitRaw(JSONOutput.errorEnvelope(code: code, message: message))
+    } else {
+        FileHandle.standardError.write("error: \(message)\n".data(using: .utf8)!)
+    }
     exit(1)
+}
+
+/// Prints `{"schema": N, "<key>": payload}` and exits. Encoding cannot be allowed to throw
+/// past here — a half-written object is worse for the caller than a clean error.
+func emit<T: Encodable>(_ payload: T, as key: String) -> Never {
+    guard let json = try? JSONOutput.envelope(payload, as: key) else {
+        fail("could not encode \(key)", code: .internalError)
+    }
+    emitRaw(json)
+    exit(0)
+}
+
+/// Maps the errors a front-end must act on differently onto stable codes. Everything else
+/// keeps its description and lands as `internal_error`, which is honest: the caller can
+/// show it but cannot branch on it.
+func errorCode(for error: Error) -> JSONOutput.ErrorCode {
+    switch error {
+    case let e as Playlist.PlaylistError:
+        if case .empty = e { return .playlistEmpty }
+        return .playlistUnreadable
+    case let e as PhysicalLayoutError:
+        switch e {
+        case .noScreens: return .noDisplays
+        case .noActiveSet: return .noCalibration
+        case .displayNotFound, .ambiguousDisplay: return .displayNotFound
+        default: return .internalError
+        }
+    case is LayoutError:
+        return .noDisplays
+    case let e as AgentInstaller.AgentError:
+        if case .notRunning = e { return .agentNotRunning }
+        return .internalError
+    case is InstanceLock.LockError:
+        return .alreadyRunning
+    default:
+        return .internalError
+    }
 }
 
 /// "15m", "90s", "2h", or a bare number of seconds.
@@ -187,7 +247,13 @@ func snapshotOriginalIfNeeded(_ state: inout WallspanState) {
 
 /// Renders and applies one image. Deliberately does NOT touch persisted state: the caller
 /// owns it, so there is exactly one load/save per operation.
-func applyOnce(image: URL, layout: PhysicalLayout, dryRun: Bool, quiet: Bool = false) throws {
+@discardableResult
+func applyOnce(
+    image: URL, layout: PhysicalLayout, dryRun: Bool, quiet: Bool = false
+) throws -> [ApplyResult] {
+    // A --json caller is parsing one object off stdout; prose interleaved with it is not
+    // parseable, so every commentary path below is off in JSON mode whatever the caller asked.
+    let quiet = quiet || jsonMode
     var loaded: SourceImage?
     let results = try WallpaperApplier.materialize(source: image, layout: layout) {
         let (source, rendered) = try renderSpan(image: image, layout: layout)
@@ -208,11 +274,12 @@ func applyOnce(image: URL, layout: PhysicalLayout, dryRun: Bool, quiet: Bool = f
             print("  --dry-run: desktop untouched. Files in "
                   + results[0].url.deletingLastPathComponent().path)
         }
-        return
+        return results
     }
 
     try WallpaperApplier.apply(results)
     if !quiet { print("  applied and verified on \(results.count) display(s)") }
+    return results
 }
 
 // MARK: - subcommands
@@ -220,17 +287,36 @@ func applyOnce(image: URL, layout: PhysicalLayout, dryRun: Bool, quiet: Bool = f
 let args = Args(CommandLine.arguments)
 
 func cmdInfo() throws {
+    let layout = try PhysicalLayoutStore.current()
+    if jsonMode { emit(Contract.LayoutReport(layout), as: "layout") }
     print(try Layout.current())
     print()
-    print(try PhysicalLayoutStore.current())
+    print(layout)
+}
+
+/// Every subcommand the dispatch switch below accepts, so a front-end can feature-detect
+/// rather than parse a version string. Kept beside the switch it describes.
+let subcommands = [
+    "info", "apply", "preview", "cycle", "verify-mapping", "selftest",
+    "layout", "calibrate", "config", "agent", "restore", "version", "help",
+]
+
+func cmdVersion() {
+    let report = Contract.VersionReport(
+        version: Wallspan.version, schema: JSONOutput.schema, commands: subcommands
+    )
+    if jsonMode { emit(report, as: "version") }
+    print("wallspan \(report.version)  (json schema \(report.schema))")
 }
 
 func cmdApply() throws {
     guard let p = args.positionals.first else { fail("usage: wallspan apply <image> [--dry-run]") }
     let image = expand(p)
-    guard FileManager.default.fileExists(atPath: image.path) else { fail("no such file: \(image.path)") }
+    guard FileManager.default.fileExists(atPath: image.path) else {
+        fail("no such file: \(image.path)", code: .noSuchFile)
+    }
     let layout = try PhysicalLayoutStore.current()
-    print("applying \(image.lastPathComponent)")
+    if !jsonMode { print("applying \(image.lastPathComponent)") }
 
     let dryRun = args.has("dry-run")
     if !dryRun {
@@ -239,7 +325,10 @@ func cmdApply() throws {
         snapshotOriginalIfNeeded(&state)
         try StateStore.save(state)
     }
-    try applyOnce(image: image, layout: layout, dryRun: dryRun)
+    let results = try applyOnce(image: image, layout: layout, dryRun: dryRun)
+    if jsonMode {
+        emit(Contract.AppliedReport(image: image, dryRun: dryRun, results: results), as: "applied")
+    }
 }
 
 func cmdPreview() throws {
@@ -265,14 +354,22 @@ func cmdLayout() throws {
 
     switch sub {
     case "show":
+        if jsonMode { emit(Contract.LayoutReport(layout), as: "layout") }
         print(layout)
         print("set: \(layout.entries.map(\.placement.name).joined(separator: " + "))")
         print("config: \(PhysicalLayoutStore.configURL.path)")
 
     case "list":
         let cfg = PhysicalLayoutStore.load()
-        guard !cfg.sets.isEmpty else { fail("no display sets calibrated yet") }
         let active = (try? PhysicalLayoutStore.activeKey()) ?? []
+        // Emitted before the empty check below: "nothing calibrated yet" is a normal state
+        // for a caller building a set switcher, so it gets an empty array. The prose path
+        // keeps its error, which is the right affordance for someone who just typed it.
+        if jsonMode {
+            emit(cfg.sets.map { Contract.DisplaySetReport($0, active: $0.displays == active) },
+                 as: "sets")
+        }
+        guard !cfg.sets.isEmpty else { fail("no display sets calibrated yet", code: .noCalibration) }
         for s in cfg.sets.sorted(by: { $0.displays.count < $1.displays.count }) {
             let names = s.displays.compactMap { s.placements[$0]?.name }.joined(separator: " + ")
             print("\(s.displays == active ? " *" : "  ") \(s.displays.count)  \(names)")
@@ -284,6 +381,7 @@ func cmdLayout() throws {
         var (cfg, i) = try PhysicalLayoutStore.loadActive()
         cfg.sets[i].placements = try PhysicalLayoutStore.seed(from: try Layout.current())
         try PhysicalLayoutStore.save(cfg)
+        if jsonMode { emit(Contract.LayoutReport(try PhysicalLayoutStore.current()), as: "layout") }
         print("re-seeded from EDID + current arrangement (gaps back to 0)")
         if StateStore.load().originalArrangement != nil {
             print("note: seeding derives origins from the macOS arrangement, which you have")
@@ -360,6 +458,7 @@ func cmdLayout() throws {
 
         try PhysicalLayoutStore.save(cfg)
         layout = try PhysicalLayoutStore.current()
+        if jsonMode { emit(Contract.LayoutReport(layout), as: "layout") }
         for g in layout.horizontalGaps {
             print(String(format: "  gap %@ | %@ = %.1f mm", g.left, g.right, g.gapMM))
         }
@@ -384,13 +483,31 @@ func cmdArrange(_ layout: PhysicalLayout) throws {
         }
         guard !origins.isEmpty else { fail("saved arrangement does not match attached displays") }
         try DisplayArranger.apply(origins)
+        if jsonMode {
+            // Re-planned after the revert, so the targets describe where things now stand
+            // rather than the deltas that were just undone.
+            emit(Contract.ArrangeReport(targets: DisplayArranger.plan(layout),
+                                        applied: true, canRevert: true), as: "arrange")
+        }
         for o in origins { print("restored \(o.name): y = \(o.y)") }
         return
     }
 
     let targets = DisplayArranger.plan(layout)
+    let canRevert = StateStore.load().originalArrangement?.isEmpty == false
+    // A single display is a normal state to report, not a failure: a front-end asking what
+    // arranging would do should get "nothing", not an error it has to special-case.
+    if jsonMode, targets.isEmpty {
+        emit(Contract.ArrangeReport(targets: [], applied: false, canRevert: canRevert),
+             as: "arrange")
+    }
     guard !targets.isEmpty else {
         fail("only one display attached; nothing to arrange")
+    }
+
+    if jsonMode, args.has("dry-run") {
+        emit(Contract.ArrangeReport(targets: targets, applied: false, canRevert: canRevert),
+             as: "arrange")
     }
 
     print("macOS arrangement (y-down points; main display stays put, horizontal untouched)\n")
@@ -408,6 +525,10 @@ func cmdArrange(_ layout: PhysicalLayout) throws {
     }
 
     guard anyChange else {
+        if jsonMode {
+            emit(Contract.ArrangeReport(targets: targets, applied: false, canRevert: canRevert),
+                 as: "arrange")
+        }
         print("\nalready matches the calibrated layout; nothing to do")
         return
     }
@@ -428,6 +549,10 @@ func cmdArrange(_ layout: PhysicalLayout) throws {
          x: Int(CGDisplayBounds($0.display.id).origin.x.rounded()), y: $0.requestedYDown)
     }
     try DisplayArranger.apply(origins)
+    if jsonMode {
+        emit(Contract.ArrangeReport(targets: DisplayArranger.plan(layout),
+                                    applied: true, canRevert: true), as: "arrange")
+    }
     print("applied permanently and verified by read-back")
 }
 
@@ -442,19 +567,23 @@ func cmdCalibrate() throws {
     let src = dir.appendingPathComponent("pattern-\(layout.fingerprint.prefix(12)).png")
     try WallpaperApplier.writePNG(pattern, to: src)
 
+    // Both suppressed under --json by the shadowed `print`.
     print("calibration pattern (\(pattern.width)x\(pattern.height))")
     print("  anchored on \(layout.anchorDisplay.display.name)")
     // --dry-run leaves the desktop alone, so the pattern and crops can be inspected
     // without first losing whatever is on screen.
     let dryRun = args.has("dry-run")
     if dryRun {
-        print("  source -> \(src.path)")
+        if !jsonMode { print("  source -> \(src.path)") }
     } else {
         var state = StateStore.load()
         snapshotOriginalIfNeeded(&state)
         try StateStore.save(state)
     }
     try applyOnce(image: src, layout: layout, dryRun: dryRun)
+    // The layout, not an acknowledgement: a caller adjusting in a loop wants the gaps the
+    // pattern it is looking at was drawn for.
+    if jsonMode { emit(Contract.LayoutReport(layout), as: "layout") }
     for g in layout.horizontalGaps {
         print(String(format: "  current gap %@ | %@ = %.1f mm", g.left, g.right, g.gapMM))
     }
@@ -522,11 +651,17 @@ func cmdSelfTest() throws {
 func cmdRestore() throws {
     let state = StateStore.load()
     guard let snaps = state.originalWallpaper, !snaps.isEmpty else {
-        fail("no saved wallpaper to restore (wallspan has not applied anything yet)")
+        fail("no saved wallpaper to restore (wallspan has not applied anything yet)",
+             code: .noSavedWallpaper)
     }
     let restored = try WallpaperApplier.restore(snaps)
     guard !restored.isEmpty else {
-        fail("none of the \(snaps.count) saved display(s) are attached; nothing restored")
+        fail("none of the \(snaps.count) saved display(s) are attached; nothing restored",
+             code: .noSavedWallpaper)
+    }
+    if jsonMode {
+        emit(Contract.RestoredReport(restored: restored, skipped: snaps.count - restored.count),
+             as: "restored")
     }
     for r in restored { print("restored \(r.display): \(r.path)") }
     if restored.count < snaps.count {
@@ -899,7 +1034,7 @@ func applyConfigFlags(to cfg: inout CycleConfig) -> Bool {
         let url = expand(d)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue
-        else { fail("not a directory: \(url.path)") }
+        else { fail("not a directory: \(url.path)", code: .noSuchFile) }
         cfg.playlistDirectory = url.path; touched = true
     }
     if let s = args.value("interval") {
@@ -913,11 +1048,21 @@ func applyConfigFlags(to cfg: inout CycleConfig) -> Bool {
     return touched
 }
 
+/// `imageCount` is nil when the directory could not be scanned at all, and 0 when it was
+/// read and held nothing. A front-end needs the difference: the first is a permissions or
+/// unmounted-volume problem, the second is an empty folder.
+func configReport(_ cfg: CycleConfig) -> Contract.ConfigReport {
+    let count = cfg.directoryURL.flatMap { try? Playlist.scan($0, recursive: cfg.recursive).count }
+    return Contract.ConfigReport(cfg, imageCount: count)
+}
+
 func cmdConfig() throws {
     let sub = args.positionals.first ?? "show"
     switch sub {
     case "show":
-        print(ConfigStore.describe(ConfigStore.load()))
+        let cfg = ConfigStore.load()
+        if jsonMode { emit(configReport(cfg), as: "config") }
+        print(ConfigStore.describe(cfg))
 
     case "set":
         var cfg = ConfigStore.load()
@@ -925,6 +1070,7 @@ func cmdConfig() throws {
             fail("nothing to set. options: --dir <path> --interval 15m --shuffle|--sequential --recursive|--no-recursive")
         }
         try ConfigStore.save(cfg)
+        if jsonMode { emit(configReport(cfg), as: "config") }
         print(ConfigStore.describe(cfg))
         if AgentInstaller.isLoaded(label: args.value("label") ?? AgentInstaller.defaultLabel) {
             print("the running agent re-reads this on its next tick; no restart needed")
@@ -955,9 +1101,10 @@ func cmdAgent() throws {
         }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
-        else { fail("configured directory does not exist: \(dir.path)") }
+        else { fail("configured directory does not exist: \(dir.path)", code: .noSuchFile) }
 
         let r = try AgentInstaller.install(label: label, binDir: binDir)
+        if jsonMode { emit(Contract.AgentReport(label: label), as: "agent") }
         print("installed \(label)")
         print("  binary  -> \(r.stagedBinary.path)")
         print("  plist   -> \(r.plist.path)")
@@ -969,6 +1116,7 @@ func cmdAgent() throws {
         print("it up on the next tick. `wallspan agent uninstall` removes it.")
 
     case "status":
+        if jsonMode { emit(Contract.AgentReport(label: label), as: "agent") }
         let plist = AgentInstaller.plistURL(label: label)
         let loaded = AgentInstaller.isLoaded(label: label)
         print("label   : \(label)")
@@ -989,6 +1137,7 @@ func cmdAgent() throws {
     case "uninstall":
         let bin = args.has("purge") ? binDir.appendingPathComponent("wallspan") : nil
         try AgentInstaller.uninstall(label: label, purgeBinary: bin)
+        if jsonMode { emit(Contract.AgentReport(label: label), as: "agent") }
         print("removed \(label)")
         if bin != nil { print("purged staged binary") }
         print("your wallpaper is unchanged; `wallspan restore` reverts it")
@@ -1083,6 +1232,17 @@ func usage() {
     """)
 }
 
+/// Subcommands with a defined `--json` payload. Everything else rejects the flag rather
+/// than emitting prose a caller cannot tell from a crash.
+let jsonCapable: Set<String> = [
+    "info", "apply", "restore", "layout", "config", "agent", "version", "calibrate",
+]
+
+if jsonMode, !jsonCapable.contains(args.subcommand) {
+    fail("--json is not supported for `\(args.subcommand)`"
+         + "  (supported: \(jsonCapable.sorted().joined(separator: ", ")))")
+}
+
 do {
     switch args.subcommand {
     case "info":        try cmdInfo()
@@ -1096,11 +1256,13 @@ do {
     case "config":      try cmdConfig()
     case "agent":       try cmdAgent()
     case "restore":     try cmdRestore()
+    case "version", "--version": cmdVersion()
     case "help", "--help", "-h": usage()
     default:
-        usage()
+        // usage() to stdout would corrupt the object a --json caller is parsing.
+        if !jsonMode { usage() }
         fail("unknown subcommand: \(args.subcommand)")
     }
 } catch {
-    fail("\(error)")
+    fail("\(error)", code: errorCode(for: error))
 }
