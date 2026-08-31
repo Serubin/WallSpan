@@ -102,26 +102,56 @@ func expand(_ path: String) -> URL {
 /// `isFinite` closes that same trap from the other side. `Double` parses "inf" and "nan",
 /// and `v <= 0.1` catches neither — NaN compares false against everything — so both reached
 /// layout.json and made every later `apply` trap on a value only a hand edit could remove.
-func measurement(_ key: String, positive: Bool = false) -> CGFloat? {
+///
+/// `px` resolves against the density of the panel and axis being adjusted — the unit you
+/// can actually count on the test pattern.
+func measurement(_ key: String, positive: Bool = false, pxPerMM: CGFloat? = nil) -> CGFloat? {
     // Args files a value-taking flag with nothing usable after it under `flags`, not
     // `values` - so `--width` alone, or `--width --height 300mm`, reads as absent here and
     // the measurement would be skipped with the same false success.
-    if args.has(key) { fail("--\(key) needs a value, e.g. --\(key) 797.22mm") }
+    if args.has(key) { fail("--\(key) needs a value, e.g. --\(key) 20px or --\(key) 797.22mm") }
     guard let raw = args.value(key) else { return nil }
-    guard let v = parseMM(raw), v.isFinite else {
-        fail("--\(key) needs a length like 797.22mm, 79.7cm or 797.22 — got '\(raw)'")
+    guard let length = parseLength(raw) else {
+        fail("--\(key) needs a length like 20px, 797.22mm, 79.7cm or 797.22 — got '\(raw)'")
     }
-    if positive, v <= 0.1 {
+
+    let mm: CGFloat
+    switch length {
+    case .mm(let v):
+        mm = v
+    case .px(let v):
+        guard let pxPerMM, pxPerMM > 0 else {
+            fail("--\(key) cannot be given in px here; use mm")
+        }
+        mm = v / pxPerMM
+    }
+    guard mm.isFinite else {
+        fail("--\(key) needs a length like 20px, 797.22mm, 79.7cm or 797.22 — got '\(raw)'")
+    }
+    if positive, mm <= 0.1 {
         fail("--\(key) must be a positive length — got '\(raw)'")
     }
-    return v
+    return mm
+}
+
+enum Length {
+    case mm(CGFloat)
+    /// Pixels of some panel; only meaningful once an axis and a density are known.
+    case px(CGFloat)
+}
+
+/// "20px", "14mm", "1.4cm", or a bare number of millimetres.
+func parseLength(_ s: String) -> Length? {
+    let t = s.trimmingCharacters(in: .whitespaces).lowercased()
+    if t.hasSuffix("px") { return Double(t.dropLast(2)).map { .px(CGFloat($0)) } }
+    if t.hasSuffix("cm") { return Double(t.dropLast(2)).map { .mm(CGFloat($0 * 10)) } }
+    if t.hasSuffix("mm") { return Double(t.dropLast(2)).map { .mm(CGFloat($0)) } }
+    return Double(t).map { .mm(CGFloat($0)) }
 }
 
 func parseMM(_ s: String) -> CGFloat? {
-    let t = s.trimmingCharacters(in: .whitespaces).lowercased()
-    if t.hasSuffix("cm") { return Double(t.dropLast(2)).map { CGFloat($0 * 10) } }
-    if t.hasSuffix("mm") { return Double(t.dropLast(2)).map { CGFloat($0) } }
-    return Double(t).map { CGFloat($0) }
+    if case .mm(let v) = parseLength(s) { return v }
+    return nil
 }
 
 // MARK: - shared pipeline
@@ -273,50 +303,61 @@ func cmdLayout() throws {
         let uuid = try PhysicalLayoutStore.resolve(args.positionals[1], in: layout)
         var (cfg, active) = try PhysicalLayoutStore.loadActive()
         guard var p = cfg.sets[active].placements[uuid] else { fail("display not in config") }
+        guard let entry = layout.entries.first(where: { $0.placement.uuid == uuid })
+        else { fail("display not attached") }
+
+        // Per axis: a hand-set size can still be anisotropic even though a seeded one is not.
+        let pxPerMMX = CGFloat(entry.display.pixelWidth) / p.sizeMM.width
+        let pxPerMMY = CGFloat(entry.display.pixelHeight) / p.sizeMM.height
 
         switch sub {
         case "nudge":
-            let dx = measurement("dx") ?? 0
-            let dy = measurement("dy") ?? 0
-            guard dx != 0 || dy != 0 else { fail("nudge needs --dx and/or --dy, e.g. --dx 14mm") }
+            let dx = measurement("dx", pxPerMM: pxPerMMX) ?? 0
+            let dy = measurement("dy", pxPerMM: pxPerMMY) ?? 0
+            guard dx != 0 || dy != 0 else { fail("nudge needs --dx and/or --dy, e.g. --dx 20px") }
             p.originMM = CGPoint(x: p.originMM.x + dx, y: p.originMM.y + dy)
-            print(String(format: "%@: origin %+.1f, %+.1f mm -> (%.1f, %.1f)",
-                         p.name, dx, dy, p.originMM.x, p.originMM.y))
+            cfg.sets[active].placements[uuid] = p
+            print(String(format: "%@: origin %+.0f, %+.0f px -> (%.1f, %.1f) mm",
+                         p.name, dx * pxPerMMX, dy * pxPerMMY, p.originMM.x, p.originMM.y))
         case "set":
             // Not `positive`: a negative origin is legitimate — the portrait panel sits
             // at negative y in the calibrated layout.
-            if let x = measurement("origin-x") { p.originMM.x = x }
-            if let y = measurement("origin-y") { p.originMM.y = y }
+            if let x = measurement("origin-x", pxPerMM: pxPerMMX) { p.originMM.x = x }
+            if let y = measurement("origin-y", pxPerMM: pxPerMMY) { p.originMM.y = y }
+            cfg.sets[active].placements[uuid] = p
             print(String(format: "%@: origin = (%.1f, %.1f) mm", p.name, p.originMM.x, p.originMM.y))
         default:
-            // Correcting a measurement must not move the panel or invent a gap.
-            // Horizontally everything to the right shifts by the width delta, preserving
-            // calibrated gaps. Vertically the centre is held: the panel did not move.
-            let oldW = p.sizeMM.width, oldH = p.sizeMM.height
-            if let w = measurement("width", positive: true) { p.sizeMM.width = w }
-            if let h = measurement("height", positive: true) { p.sizeMM.height = h }
-            p.originMM.y -= (p.sizeMM.height - oldH) / 2
-            let dw = p.sizeMM.width - oldW
-            cfg.sets[active].placements[uuid] = p
-            if dw != 0 {
-                for (k, var other) in cfg.sets[active].placements where k != uuid {
-                    if other.originMM.x > p.originMM.x {
-                        other.originMM.x += dw
-                        cfg.sets[active].placements[k] = other
-                    }
-                }
+            var size = p.sizeMM
+
+            // Same control as --width/--height, but tunable by eye: a scale error shows as
+            // circles breaking across the seam.
+            if let percent = args.value("scale").flatMap(Double.init) {
+                guard percent > 1, percent < 1000 else { fail("--scale is a percent, e.g. 100.6") }
+                size.width *= CGFloat(percent / 100)
+                size.height *= CGFloat(percent / 100)
+            } else if let ppi = args.value("ppi").flatMap(Double.init) {
+                guard ppi > 1 else { fail("--ppi must be positive, e.g. 109.6") }
+                size.width = CGFloat(Double(entry.display.pixelWidth) / (ppi / 25.4))
+                size.height = CGFloat(Double(entry.display.pixelHeight) / (ppi / 25.4))
+            } else {
+                if let w = measurement("width", positive: true) { size.width = w }
+                if let h = measurement("height", positive: true) { size.height = h }
             }
-            print(String(format: "%@: active area = %.1f x %.1f mm", p.name, p.sizeMM.width, p.sizeMM.height))
+
+            let (dw, dh) = PhysicalLayoutStore.resize(uuid, to: size,
+                                                      in: &cfg.sets[active].placements)
+            p = cfg.sets[active].placements[uuid] ?? p
+            print(String(format: "%@: active area = %.1f x %.1f mm  (%.2f PPI)",
+                         p.name, size.width, size.height,
+                         Double(entry.display.pixelWidth) / Double(size.width / 25.4)))
             if dw != 0 {
                 print(String(format: "  shifted displays to the right by %+.1f mm to preserve gaps", dw))
             }
-            if p.sizeMM.height != oldH {
-                print(String(format: "  held vertical centre (bottom edge moved %+.1f mm)",
-                             -(p.sizeMM.height - oldH) / 2))
+            if dh != 0 {
+                print(String(format: "  held vertical centre (bottom edge moved %+.1f mm)", -dh / 2))
             }
         }
 
-        cfg.sets[active].placements[uuid] = p
         try PhysicalLayoutStore.save(cfg)
         layout = try PhysicalLayoutStore.current()
         for g in layout.horizontalGaps {
@@ -998,9 +1039,15 @@ func usage() {
 
       wallspan layout show
       wallspan layout list                                # every calibrated set
-      wallspan layout nudge <display> --dx 14mm --dy -3mm
-      wallspan layout size  <display> --width 797.2mm     # override bad EDID
+      wallspan layout nudge <display> --dx 20px --dy -4px
+      wallspan layout size  <display> --ppi 109.6         # or --scale 100.6
+      wallspan layout size  <display> --width 797.2mm     # if you have the spec sheet
       wallspan layout reset                               # back to edge-to-edge
+
+      Lengths take px, mm or cm. Panel sizes are corrected to square pixels on the
+      way in - `layout show` says when it has. A size wrong in both axes at once
+      survives that, and shows as circles breaking across the seam; `--ppi` and
+      `--scale` dial it out by eye.
 
       Calibration is per display SET: the laptop alone, the two externals, and
       all three together each keep their own. Editing one leaves the rest

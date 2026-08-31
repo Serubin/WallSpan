@@ -176,6 +176,58 @@ public enum PhysicalLayoutStore {
         return mm
     }
 
+    /// The panel's active area, forced to square pixels.
+    ///
+    /// EDID's per-axis sizes are often rounded to whole centimetres, which skews each axis
+    /// by up to 5 mm but barely moves the diagonal — so keep the diagonal and impose the
+    /// pixel aspect. Both axes wrong the same way is a pure scale error this cannot see;
+    /// that is what `layout size` is for.
+    public static func panelSizeMM(for display: DisplayInfo) -> CGSize {
+        let reported = edidSizeMM(for: display.id)
+        let pw = CGFloat(display.pixelWidth), ph = CGFloat(display.pixelHeight)
+        guard pw > 0, ph > 0, reported.width > 0, reported.height > 0 else { return reported }
+
+        let diagonal = (reported.width * reported.width + reported.height * reported.height)
+            .squareRoot()
+        let aspect = pw / ph
+        let width = diagonal * aspect / (aspect * aspect + 1).squareRoot()
+        guard width.isFinite, width > 1 else { return reported }
+        return CGSize(width: width, height: width / aspect)
+    }
+
+    /// Whether the reported size implies non-square pixels, which no flat panel has.
+    public static func reportsNonSquarePixels(_ display: DisplayInfo) -> Bool {
+        let mm = edidSizeMM(for: display.id)
+        guard mm.width > 0, mm.height > 0 else { return false }
+        let dx = CGFloat(display.pixelWidth) / mm.width
+        let dy = CGFloat(display.pixelHeight) / mm.height
+        return abs(dx - dy) / max(dx, dy) > 0.002
+    }
+
+    /// Resizes one panel without moving it or inventing a gap: panels to its right shift by
+    /// the width delta, and its vertical centre is held. It was re-measured, not moved.
+    @discardableResult
+    public static func resize(
+        _ uuid: String, to size: CGSize, in placements: inout [String: Placement]
+    ) -> (widthDelta: CGFloat, heightDelta: CGFloat) {
+        guard var p = placements[uuid] else { return (0, 0) }
+        let dw = size.width - p.sizeMM.width
+        let dh = size.height - p.sizeMM.height
+        p.sizeMM = size
+        p.originMM.y -= dh / 2
+        placements[uuid] = p
+
+        if dw != 0 {
+            for (k, var other) in placements where k != uuid {
+                if other.originMM.x > p.originMM.x {
+                    other.originMM.x += dw
+                    placements[k] = other
+                }
+            }
+        }
+        return (dw, dh)
+    }
+
     static let file = JSONFile<LayoutConfig>(url: PhysicalLayoutStore.configURL)
 
     public static func load() -> LayoutConfig { file.load(default: LayoutConfig()) }
@@ -195,7 +247,7 @@ public enum PhysicalLayoutStore {
         var cursorX: CGFloat = 0
         for d in ordered {
             guard let uuid = uuid(for: d.id) else { throw PhysicalLayoutError.noUUID(d.name) }
-            let size = edidSizeMM(for: d.id)
+            let size = panelSizeMM(for: d)
             placements[uuid] = Placement(
                 uuid: uuid, name: d.name,
                 originMM: CGPoint(x: cursorX, y: 0), sizeMM: size
@@ -242,7 +294,7 @@ public enum PhysicalLayoutStore {
         _ d: DisplayInfo, uuid newUUID: String,
         into placements: inout [String: Placement], from layout: Layout
     ) {
-        let size = edidSizeMM(for: d.id)
+        let size = panelSizeMM(for: d)
         let ordered = layout.displays.sorted { $0.frame.minX < $1.frame.minX }
         let idx = ordered.firstIndex { $0.id == d.id } ?? 0
         func placement(_ x: DisplayInfo) -> Placement? {
@@ -324,8 +376,10 @@ public enum PhysicalLayoutStore {
         var dirty = false
         var placements: [String: Placement]
 
+        let setIndex: Int
         if let i = cfg.exactIndex(for: key) {
             placements = cfg.sets[i].placements
+            setIndex = i
         } else {
             // Derive from whichever set shares the most displays, so plugging one more in
             // inherits the gaps already measured instead of starting blank. Only when
@@ -339,6 +393,14 @@ public enum PhysicalLayoutStore {
                 placements = try seed(from: logical)
             }
             cfg.sets.append(DisplaySet(displays: key, placements: placements))
+            setIndex = cfg.sets.count - 1
+            dirty = true
+        }
+
+        // After both branches: an inherited set carries the parent's sizes, which are just
+        // as likely to predate the correction as a stored set's own.
+        if correctUntouchedSizes(&placements, for: ids) {
+            cfg.sets[setIndex].placements = placements
             dirty = true
         }
 
@@ -348,6 +410,25 @@ public enum PhysicalLayoutStore {
         }
         if dirty { try? save(cfg) }
         return try PhysicalLayout(entries: entries)
+    }
+
+    /// Re-seeds sizes still equal to what the display reports, which proves they were never
+    /// set by hand. Anything hand-measured differs, and is left alone.
+    static func correctUntouchedSizes(
+        _ placements: inout [String: Placement], for ids: [(display: DisplayInfo, uuid: String)]
+    ) -> Bool {
+        var changed = false
+        for (d, u) in ids {
+            guard let stored = placements[u], reportsNonSquarePixels(d) else { continue }
+            let reported = edidSizeMM(for: d.id)
+            // Not exact equality: the stored value round-trips through JSON.
+            guard abs(stored.sizeMM.width - reported.width) < 0.05,
+                  abs(stored.sizeMM.height - reported.height) < 0.05
+            else { continue }
+            resize(u, to: panelSizeMM(for: d), in: &placements)
+            changed = true
+        }
+        return changed
     }
 
     /// Resolves "0", "dell", "LG ULTRAGEAR" to one attached display.
@@ -386,9 +467,21 @@ extension PhysicalLayout: CustomStringConvertible {
                 p.sizeMM.width, p.sizeMM.height, d.pixelWidth, d.pixelHeight,
                 pxPerMMx, pxPerMMy, ppi,
                 abs(pxPerMMx - pxPerMMy) > 0.02
-                    ? "  <- non-square; EDID is suspect, consider `layout size`" : "",
+                    ? "  <- non-square; set the real size with `layout size`" : "",
                 p.uuid
             )
+            // A correction the reader cannot see is one they cannot overrule.
+            let reported = PhysicalLayoutStore.edidSizeMM(for: d.id)
+            if abs(reported.width - p.sizeMM.width) > 0.05
+                || abs(reported.height - p.sizeMM.height) > 0.05 {
+                out += String(
+                    format: "      note     = the display reports %.1f x %.1f mm (%.2f x %.2f"
+                          + " px/mm); corrected to square pixels\n\n",
+                    reported.width, reported.height,
+                    CGFloat(d.pixelWidth) / reported.width,
+                    CGFloat(d.pixelHeight) / reported.height
+                )
+            }
         }
         let gaps = horizontalGaps
         if gaps.isEmpty {
