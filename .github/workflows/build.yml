@@ -74,6 +74,29 @@ jobs:
         # stops working. Shape is asserted, not values: a runner has no display.
         run: Scripts/check-json-contract.sh '${{ steps.bin.outputs.path }}'
 
+      - name: Build Wallspan.app
+        id: app
+        run: |
+          set -euo pipefail
+          Scripts/make-app.sh --universal
+          APP=dist/Wallspan.app
+          # The bundle is what users double-click, so a broken signature or a missing
+          # helper has to fail here rather than on their machine.
+          codesign --verify --deep --strict "$APP"
+          test -x "$APP/Contents/MacOS/Wallspan"
+          test -x "$APP/Contents/Helpers/wallspan"
+          for want in arm64 x86_64; do
+            lipo -archs "$APP/Contents/MacOS/Wallspan" | grep -qw "$want" \
+              || { echo "::error::$want missing from the app binary"; exit 1; }
+          done
+          echo "zip=$(ls dist/Wallspan-*.zip)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Wallspan-app
+          path: ${{ steps.app.outputs.zip }}
+          if-no-files-found: error
+
       - name: Package
         id: pkg
         run: |
@@ -119,7 +142,9 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
-          files: dist/**/*.tar.gz
+          files: |
+            dist/**/*.tar.gz
+            dist/**/Wallspan-*.zip
           body: |
             Universal binary (arm64 + x86_64), macOS 14+.
 
@@ -130,4 +155,14 @@ jobs:
             ./wallspan info
             ```
 
-            Not signed or notarised, so Gatekeeper blocks it until the `xattr` line above.
+            `Wallspan.app` is the menu bar app; it bundles the same CLI and prefers
+            whichever `wallspan` is on your PATH.
+
+            ```sh
+            unzip Wallspan-*.zip
+            xattr -dr com.apple.quarantine Wallspan.app
+            open Wallspan.app
+            ```
+
+            Neither is signed or notarised, so Gatekeeper blocks them until the `xattr`
+            lines above.

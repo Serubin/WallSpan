@@ -43,6 +43,38 @@ to what you had before wallspan, not to whatever it set most recently.
 To keep it cycling in the background and across logins, see
 [Running unattended](#running-unattended).
 
+## The menu bar app
+
+`Wallspan.app` is a menu bar item for people who would rather not use a terminal: it shows
+what is on screen and when it changes next, and offers Next, Pause, a folder picker, an
+interval, and Restore.
+
+```sh
+Scripts/make-app.sh          # builds dist/Wallspan.app
+open dist/Wallspan.app
+```
+
+It is a wrapper, not a second implementation — it spawns `wallspan` and reads its `--json`
+output, and contains no wallpaper logic of its own. So it prefers whichever `wallspan` is
+on your `PATH` and falls back to the copy inside the bundle, which means updating the CLI
+updates the app's behaviour with no new app. **About Wallspan** shows which one is in use;
+`defaults write net.serubin.wallspan.app PreferBundledCLI -bool true` pins it to the bundle.
+
+The contract between them is [documented](docs/cli-json-contract.md) and versioned, so the
+two can be released independently.
+
+Two switches, deliberately separate. **Cycle in the Background** installs the LaunchAgent
+described below, pointed at the binary the app resolved; cycling then continues after you
+quit the app, which is the intent rather than a bug. **Open Wallspan at Login** only brings
+the menu bar item back.
+
+If the agent is left pointing at a binary that no longer exists — you moved the app out of
+Downloads, say — the app repairs it on the next launch. If it points at a different but
+working copy, the app leaves it alone and offers to switch instead.
+
+**Install Command Line Tool…** symlinks the bundled CLI into `~/.local/bin`, so `wallspan`
+works in a terminal too. A symlink rather than a copy, so it tracks the app.
+
 ## Running unattended
 
 ```sh
