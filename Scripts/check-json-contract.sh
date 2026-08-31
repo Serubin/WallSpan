@@ -60,8 +60,11 @@ expect_envelope layout    layout show
 expect_envelope sets      layout list
 expect_envelope config    config show
 expect_envelope agent     agent status
+expect_envelope status    status
 expect_envelope arrange   layout arrange --dry-run
 expect_envelope applied   apply /nonexistent.jpg
+# Nothing is cycling here, so this exercises the agent_not_running path.
+expect_envelope next      next
 # Error paths too: a caller cannot branch on a code it cannot parse.
 expect_envelope layout    layout nudge nosuchdisplay --dx 1px
 expect_envelope layout    layout nudge 0 --dx 20in
@@ -97,6 +100,8 @@ case "$reported" in
         expect_envelope arrange   layout arrange
         expect_envelope arrange   layout arrange --revert
         expect_envelope config    config set --interval 30m
+        expect_envelope config    pause
+        expect_envelope config    resume
         expect_envelope restored  restore
         ;;
     *)

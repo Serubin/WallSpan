@@ -10,17 +10,34 @@ public struct CycleConfig: Codable, Equatable {
     public var intervalSeconds: Double
     public var shuffle: Bool
     public var recursive: Bool
+    /// Held here rather than signalled, because `KeepAlive` respawns the agent and a
+    /// signal's effect would not survive that — the wallpaper would silently start moving
+    /// again after a crash or a logout. Defaulted for configs written before it existed.
+    public var paused: Bool
 
     public init(
         playlistDirectory: String? = nil,
         intervalSeconds: Double = 900,
         shuffle: Bool = true,
-        recursive: Bool = false
+        recursive: Bool = false,
+        paused: Bool = false
     ) {
         self.playlistDirectory = playlistDirectory
         self.intervalSeconds = intervalSeconds
         self.shuffle = shuffle
         self.recursive = recursive
+        self.paused = paused
+    }
+
+    /// Explicit so a `config.json` predating `paused` still decodes instead of falling back
+    /// to defaults, which would silently discard the user's directory and interval.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        playlistDirectory = try c.decodeIfPresent(String.self, forKey: .playlistDirectory)
+        intervalSeconds = try c.decodeIfPresent(Double.self, forKey: .intervalSeconds) ?? 900
+        shuffle = try c.decodeIfPresent(Bool.self, forKey: .shuffle) ?? true
+        recursive = try c.decodeIfPresent(Bool.self, forKey: .recursive) ?? false
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
     }
 
     public var directoryURL: URL? {
@@ -44,6 +61,7 @@ public enum ConfigStore {
         out += "  interval  : \(formatInterval(cfg.intervalSeconds))\n"
         out += "  order     : \(cfg.shuffle ? "shuffled" : "sequential")\n"
         out += "  recursive : \(cfg.recursive)\n"
+        if cfg.paused { out += "  paused    : yes  (`wallspan resume` starts it again)\n" }
         if let dir = cfg.directoryURL {
             let n = (try? Playlist.scan(dir, recursive: cfg.recursive).count) ?? 0
             out += "\n  \(n) decodable image(s) found\n"

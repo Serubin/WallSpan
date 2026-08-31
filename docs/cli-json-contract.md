@@ -60,6 +60,9 @@ Dates are ISO-8601 strings, not Foundation reference-date numbers.
 | `layout arrange --json` | `arrange` | Add `--dry-run` to preview, `--revert` to undo. |
 | `config show --json` | `config` | |
 | `config set … --json` | `config` | The state after the write. |
+| `status --json` | `status` | Everything a status display needs. See below. |
+| `pause --json` / `resume --json` | `config` | |
+| `next --json` | `next` | `{pid, signal}`. The effect is async — poll `status` for it. |
 | `apply <img> [--dry-run] --json` | `applied` | Per-display PNG paths and cache hits. |
 | `restore --json` | `restored` | Plus `skipped`, for saved displays not attached now. |
 | `agent status\|install\|uninstall --json` | `agent` | `program` is the binary the plist launches. |
@@ -67,6 +70,36 @@ Dates are ISO-8601 strings, not Foundation reference-date numbers.
 `cycle`, `preview`, `selftest` and `verify-mapping` reject `--json`: either they are a
 foreground log, or their result is a human judgement rather than an object worth pinning
 down.
+
+### `status`
+
+Composed from three sources rather than read from one file: `status.json` says what the
+cycler last did, `config.json` says what it is meant to do, and the cycle lock says whether
+anything is actually doing it. A front-end reading only the file would show a confident
+countdown for a cycler that died an hour ago.
+
+- `running` — something holds the cycle lock. Covers a foreground `wallspan cycle` as well
+  as the LaunchAgent, which `launchctl print` alone does not. The lock is probed, not
+  inferred from a pid, so a stale lock file reads as "nobody" and a recycled pid cannot
+  masquerade as a live cycler.
+- `nextAt` — when the next change is due, already computed. `null` exactly when a countdown
+  would be a lie: nothing running, paused, or nothing applied yet.
+- `intervalSeconds` — a running cycler's *effective* interval, which is not always the
+  config's: `cycle --interval 10m` overrides the file for that run.
+- `lastError` — why the last tick failed, cleared by the next one that succeeds. This is how
+  an unreadable playlist directory reaches a UI at all: the agent runs under launchd and
+  cannot raise a TCC prompt, so without this the folder just appears to do nothing.
+
+### Pause and next
+
+`pause` is durable state in `config.json`, not a signal — `KeepAlive` respawns the agent, and
+a signalled pause would not survive a crash or a logout. The running cycler notices within
+five seconds; resuming changes the wallpaper immediately rather than waiting out the interval.
+
+`next` is a signal (`SIGUSR1`), because "change now" has no durable meaning worth persisting.
+It works while paused and leaves the pause in place: pause governs the schedule, not manual
+control, so a front-end with both a pause switch and a Next button does not end up with a
+Next that silently does nothing.
 
 ### Fields worth knowing
 
