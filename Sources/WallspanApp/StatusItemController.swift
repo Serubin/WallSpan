@@ -22,6 +22,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// Every CLI call runs here. Serial, so two menu clicks cannot interleave a `pause` and
     /// a `status` and render the earlier one's answer.
     private let queue = DispatchQueue(label: "net.serubin.wallspan.cli", qos: .userInitiated)
+    /// One controller for the life of the app, so two calibration windows cannot both be
+    /// pausing and resuming cycling.
+    private let calibration = CalibrationWindowController()
     private var refreshTimer: Timer?
     /// Faster polling only while the menu is open — the countdown is visible then, and
     /// invisible the rest of the time.
@@ -283,8 +286,31 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 + "across the gap. `wallspan calibrate` measures it."
             submenu.addItem(note)
         }
+        submenu.addItem(.separator())
+        let calibrate = item("Calibrate…", #selector(openCalibration))
+        // Offered on a single display too: the window explains why there is nothing to
+        // calibrate, and correcting a wrong panel size there is still worthwhile.
+        calibrate.toolTip = layout.displays.count < 2
+            ? "Needs two or more displays to measure a bezel gap."
+            : "Line the picture up across the bezels."
+        submenu.addItem(calibrate)
         parent.submenu = submenu
         menu.addItem(parent)
+    }
+
+    @objc private func openCalibration() { showCalibration() }
+
+    /// Also the entry point for `--calibrate`. Waits for resolution rather than giving up:
+    /// at launch the binary probe has usually not finished yet.
+    func showCalibration(retriesLeft: Int = 20) {
+        guard let runner = resolution?.runner else {
+            guard retriesLeft > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.showCalibration(retriesLeft: retriesLeft - 1)
+            }
+            return
+        }
+        calibration.show(runner: runner)
     }
 
     private func addCommandLineToolItem() {

@@ -75,6 +75,22 @@ working copy, the app leaves it alone and offers to switch instead.
 **Install Command Line Tool…** symlinks the bundled CLI into `~/.local/bin`, so `wallspan`
 works in a terminal too. A symlink rather than a copy, so it tracks the app.
 
+### Calibrating from the app
+
+**Displays ▸ Calibrate…** opens a window that does the bezel measurement described below
+without the terminal. It puts the test pattern on your screens, and the arrow keys move
+the selected panel — the judgement still happens by eye, across the bezel, so the window
+stays small and out of the way. Gap readouts update as you go; the pattern follows a moment
+later, once you stop pressing.
+
+Two controls, because there are two ways to be wrong. **Arrow keys** move a panel, in
+pixels — diagonals breaking across the bezel mean the position is off. **Panel scale**
+changes its density, in PPI — circles breaking while the diagonals line up mean the scale
+is off, and no amount of nudging fixes that.
+
+It pauses cycling while it is open and resumes when you close it — unless you had already
+paused it yourself, in which case it leaves it alone.
+
 ## Running unattended
 
 ```sh

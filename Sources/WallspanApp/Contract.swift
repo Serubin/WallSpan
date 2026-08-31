@@ -141,29 +141,118 @@ enum Contract {
         }
     }
 
-    struct Display: Decodable {
+    struct Display: Decodable, Identifiable {
+        var uuid: String
         var name: String
         var pixelWidth: Int
         var pixelHeight: Int
+        /// `[x, y]` and `[width, height]` in millimetres, y-up, as the CLI reports them.
+        var originMM: [Double]
+        var sizeMM: [Double]
+        var reportedSizeMM: [Double]
+        var pxPerMMX: Double
+        var pxPerMMY: Double
         var densitySuspect: Bool
+
+        var id: String { uuid }
+        var originX: Double { originMM.first ?? 0 }
+        var originY: Double { originMM.count > 1 ? originMM[1] : 0 }
+        var widthMM: Double { sizeMM.first ?? 0 }
+        var heightMM: Double { sizeMM.count > 1 ? sizeMM[1] : 0 }
+        /// Pixels per mm, guarded so a zero can never reach a division.
+        var densityX: Double { pxPerMMX > 0 ? pxPerMMX : 1 }
+        var densityY: Double { pxPerMMY > 0 ? pxPerMMY : 1 }
+        var ppi: Double { densityX * 25.4 }
+        /// True once the stored size no longer matches what the panel claims.
+        var sizeWasCorrected: Bool {
+            guard reportedSizeMM.count > 1 else { return false }
+            return abs(reportedSizeMM[0] - widthMM) > 0.05
+                || abs(reportedSizeMM[1] - heightMM) > 0.05
+        }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: AnyKey.self)
+            uuid = c.or("uuid", "")
             name = c.or("name", "display")
             pixelWidth = c.or("pixelWidth", 0)
             pixelHeight = c.or("pixelHeight", 0)
+            originMM = c.or("originMM", [0, 0])
+            sizeMM = c.or("sizeMM", [0, 0])
+            reportedSizeMM = c.or("reportedSizeMM", [])
+            pxPerMMX = c.or("pxPerMMX", 0)
+            pxPerMMY = c.or("pxPerMMY", 0)
             densitySuspect = c.or("densitySuspect", false)
+        }
+    }
+
+    struct Gap: Decodable, Identifiable {
+        var left: String
+        var right: String
+        var leftUUID: String
+        var rightUUID: String
+        var gapMM: Double
+
+        var id: String { leftUUID + rightUUID }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: AnyKey.self)
+            left = c.or("left", "")
+            right = c.or("right", "")
+            leftUUID = c.or("leftUUID", "")
+            rightUUID = c.or("rightUUID", "")
+            gapMM = c.or("gapMM", 0)
         }
     }
 
     struct Layout: Decodable {
         var displays: [Display]
+        var gaps: [Gap]
         var calibrated: Bool
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: AnyKey.self)
             displays = c.or("displays", [])
+            gaps = c.or("gaps", [])
             calibrated = c.or("calibrated", false)
+        }
+    }
+
+    struct Arrange: Decodable {
+        struct Target: Decodable, Identifiable {
+            var uuid: String
+            var name: String
+            var currentY: Int
+            var requestedY: Int
+            var delta: Int
+            var residualTopPt: Double
+            var residualBottomPt: Double
+
+            var id: String { uuid }
+            /// Density mismatch the arrangement cannot remove, only centre. Shown so the
+            /// result is not presented as exact when it cannot be.
+            var hasResidual: Bool { abs(residualTopPt) > 0.5 || abs(residualBottomPt) > 0.5 }
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: AnyKey.self)
+                uuid = c.or("uuid", "")
+                name = c.or("name", "display")
+                currentY = c.or("currentY", 0)
+                requestedY = c.or("requestedY", 0)
+                delta = c.or("delta", 0)
+                residualTopPt = c.or("residualTopPt", 0)
+                residualBottomPt = c.or("residualBottomPt", 0)
+            }
+        }
+
+        var targets: [Target]
+        var applied: Bool
+        var canRevert: Bool
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: AnyKey.self)
+            targets = c.or("targets", [])
+            applied = c.or("applied", false)
+            canRevert = c.or("canRevert", false)
         }
     }
 }

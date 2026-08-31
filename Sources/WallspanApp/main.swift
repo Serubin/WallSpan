@@ -11,7 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: StatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        controller = StatusItemController()
+        let controller = StatusItemController()
+        self.controller = controller
+        // `--calibrate` opens the calibration window straight away, without going through
+        // the menu. It is the only way to reach that window from a script, which is what
+        // makes it testable at all — a menu item cannot be clicked from a terminal.
+        if CommandLine.arguments.contains("--calibrate") {
+            controller.showCalibration()
+        }
     }
 }
 
