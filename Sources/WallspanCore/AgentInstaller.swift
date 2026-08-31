@@ -33,6 +33,7 @@ public enum AgentInstaller {
         case cannotLocateBinary
         case launchctl(String, Int32, String)
         case notRunning(String)
+        case notExecutable(URL)
 
         public var description: String {
             switch self {
@@ -42,6 +43,8 @@ public enum AgentInstaller {
                 return "launchctl \(cmd) failed (exit \(code))\(out.isEmpty ? "" : ":\n  " + out)"
             case .notRunning(let label):
                 return "\(label) was bootstrapped but is not running - check \(logURL.path)"
+            case .notExecutable(let u):
+                return "not an executable file: \(u.path)"
             }
         }
     }
@@ -107,11 +110,14 @@ public enum AgentInstaller {
     }
 
     public struct InstallResult {
-        public let stagedBinary: URL
+        /// The binary the agent will launch — the staged copy, or whatever was named.
+        public let binary: URL
         public let plist: URL
         public let pid: Int?
     }
 
+    /// Stages a copy into `binDir`, then points the agent at it. The staging is the point:
+    /// it puts `wallspan` on PATH and decouples the agent from the build directory.
     public static func install(label: String, binDir: URL) throws -> InstallResult {
         let source = try runningBinary()
         try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
@@ -124,13 +130,21 @@ public enum AgentInstaller {
             }
             try FileManager.default.copyItem(at: source, to: staged)
         }
+        return try install(label: label, binary: staged)
+    }
 
+    /// Points the agent at a binary already in place. Separate from staging: an app bundle
+    /// pointing launchd inside itself must not also get a copy that goes stale.
+    public static func install(label: String, binary: URL) throws -> InstallResult {
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            throw AgentError.notExecutable(binary)
+        }
         try FileManager.default.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(
             at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true
         )
         let plist = plistURL(label: label)
-        try makePlist(label: label, binary: staged).write(to: plist, atomically: true, encoding: .utf8)
+        try makePlist(label: label, binary: binary).write(to: plist, atomically: true, encoding: .utf8)
 
         // Tolerate "not loaded" on the way out, then load fresh.
         _ = try? run(["bootout", "\(domain)/\(label)"])
@@ -142,14 +156,11 @@ public enum AgentInstaller {
         // Give launchd a moment to actually spawn it before reporting a pid.
         Thread.sleep(forTimeInterval: 1.2)
         guard let pid = pid(label: label) else { throw AgentError.notRunning(label) }
-        return InstallResult(stagedBinary: staged, plist: plist, pid: pid)
+        return InstallResult(binary: binary, plist: plist, pid: pid)
     }
 
-    /// The binary the installed plist actually launches, or nil if nothing is installed.
-    ///
-    /// Read from the plist rather than from `launchctl print`, so it answers for an agent
-    /// that is installed but not currently loaded — which is exactly the state a caller
-    /// checking for a stale or moved binary needs to see.
+    /// What the installed plist launches, or nil. Read from the plist, not `launchctl`, so
+    /// it answers for an agent that is installed but not loaded.
     public static func installedProgram(label: String) -> URL? {
         guard let data = try? Data(contentsOf: plistURL(label: label)),
               let plist = try? PropertyListSerialization.propertyList(

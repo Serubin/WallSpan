@@ -111,9 +111,6 @@ Next that silently does nothing.
   never measured.
 - `layout.displays[].densitySuspect` — EDID implies non-square pixels, so `layout size` is
   worth running.
-- `agent.program` — what the installed plist actually launches, readable even when the
-  agent is not loaded. This is how a front-end notices an agent left pointing at a moved
-  or deleted binary.
 - `gaps[].leftUUID` / `.rightUUID` — the names beside them are for display only. Two
   identical monitors report the same `localizedName`, so a caller mapping a gap back to a
   panel it can nudge must use the UUID. `layout nudge` accepts a UUID as well as an index
@@ -124,9 +121,11 @@ Next that silently does nothing.
 - `arrange.applied` — false for `--dry-run` *and* when nothing needed changing. With one
   display attached, `targets` is empty and this is false; that is a normal answer, not an
   error.
-- `agent.program` — what the installed plist actually launches, readable even when the
-  agent is not loaded. This is how a front-end notices an agent left pointing at a moved
-  or deleted binary.
+- `agent.program` / `agent.programExists` — what the installed plist actually launches, and
+  whether it is still there. Readable even when the agent is not loaded. Together they let a
+  front-end tell "pointing at a different binary" from "pointing at nothing", which is the
+  difference between offering to switch and having to repair. Point the agent somewhere
+  specific with `agent install --binary <path>`, which stages no copy.
 
 ## Error codes
 

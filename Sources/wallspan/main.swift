@@ -1269,10 +1269,14 @@ func cmdAgent() throws {
         guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
         else { fail("configured directory does not exist: \(dir.path)", code: .noSuchFile) }
 
-        let r = try AgentInstaller.install(label: label, binDir: binDir)
+        // --binary points the agent at a binary that already lives where it should, with
+        // no staged copy. An app bundle uses this to run the CLI from inside itself; a copy
+        // in ~/.local/bin would go stale the moment the app updated.
+        let r = try args.value("binary").map { try AgentInstaller.install(label: label, binary: expand($0)) }
+            ?? AgentInstaller.install(label: label, binDir: binDir)
         if jsonMode { emit(Contract.AgentReport(label: label), as: "agent") }
         print("installed \(label)")
-        print("  binary  -> \(r.stagedBinary.path)")
+        print("  binary  -> \(r.binary.path)")
         print("  plist   -> \(r.plist.path)")
         print("  log     -> \(AgentInstaller.logURL.path)")
         print("  running -> pid \(r.pid.map(String.init) ?? "?")")
@@ -1357,11 +1361,17 @@ func usage() {
           touching the LaunchAgent. A running agent picks changes up next tick.
 
       wallspan agent install [--dir <path>] [--interval 15m]
+                            [--binary <path>] [--label <label>]
       wallspan agent status
       wallspan agent uninstall [--purge]
           Installs `wallspan cycle` as a per-user LaunchAgent, which also
           re-applies at login. It has to be a LaunchAgent and not a cron job:
           setDesktopImageURL needs a GUI session, which cron does not have.
+
+          By default it stages a copy into ~/.local/bin, which also puts
+          wallspan on your PATH. --binary points launchd at a binary that
+          already lives where it should and stages nothing - for a copy inside
+          an app bundle, where a second copy would go stale on the next update.
 
     BEZEL CALIBRATION
       Monitors have bezels; macOS places displays edge-to-edge and cannot express

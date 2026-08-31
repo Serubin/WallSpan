@@ -274,6 +274,10 @@ extension Contract {
         /// The binary the plist actually launches. The menu bar app compares this against
         /// the CLI it resolved, to notice an agent left pointing at a moved or stale copy.
         public var program: String?
+        /// Whether that binary is still there. Reported rather than left to the caller to
+        /// stat, so the CLI stays the only thing that knows where an agent can live — and
+        /// so a front-end can tell "pointing somewhere else" from "pointing at nothing".
+        public var programExists: Bool
 
         public init(label: String) {
             let plist = AgentInstaller.plistURL(label: label)
@@ -283,7 +287,11 @@ extension Contract {
             loaded = AgentInstaller.isLoaded(label: label)
             pid = AgentInstaller.pid(label: label)
             logPath = AgentInstaller.logURL.path
-            program = AgentInstaller.installedProgram(label: label)?.path
+            let installed = AgentInstaller.installedProgram(label: label)
+            program = installed?.path
+            programExists = installed.map {
+                FileManager.default.isExecutableFile(atPath: $0.path)
+            } ?? false
         }
     }
 }
