@@ -10,6 +10,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
 
     private var resolution: BinaryResolver.Resolution?
+    /// Separates "still probing" from "probed, found nothing", which the button renders
+    /// differently.
+    private var didResolve = false
     private var status: Contract.Status?
     private var agent: Contract.Agent?
     private var layout: Contract.Layout?
@@ -39,10 +42,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         super.init()
         menu.delegate = self
         statusItem.menu = menu
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "photo.on.rectangle", accessibilityDescription: "Wallspan"
-        )
-        statusItem.button?.image?.isTemplate = true
+        updateButton()
 
         resolveBinary()
         refresh()
@@ -67,7 +67,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
             FileHandle.standardError.write(Data((line + "\n").utf8))
             DispatchQueue.main.async {
+                self?.didResolve = true
                 self?.resolution = resolved
+                // Before refresh(), which returns early when nothing resolved.
+                self?.updateButton()
                 self?.refresh()
             }
         }
@@ -124,19 +127,38 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // MARK: - the button
 
     private func updateButton() {
-        let symbol: String
-        if resolution == nil {
-            symbol = "exclamationmark.triangle"
+        guard let button = statusItem.button else { return }
+
+        let image: NSImage?
+        let dimmed: Bool
+        let label: String
+        if didResolve, resolution == nil {
+            image = symbol("exclamationmark.triangle")
+            dimmed = false
+            label = "Wallspan, no command line tool found"
         } else if status?.paused == true {
-            symbol = "pause.circle"
-        } else if status?.running == true {
-            symbol = "photo.on.rectangle"
+            image = symbol("pause.circle")
+            dimmed = false
+            label = "Wallspan, paused"
         } else {
-            symbol = "photo"
+            // Dimmed by AppKit, not a fainter glyph: the menu bar is translucent over the
+            // wallpaper this app changes, so a fixed alpha has no reliable contrast.
+            image = BrandGlyph.menuBar
+            dimmed = status?.running != true
+            label = dimmed ? "Wallspan, not cycling" : "Wallspan, cycling"
         }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Wallspan")
+        button.image = image
+        button.appearsDisabled = dimmed
+        // On the button, not the shared glyph; dimming alone is silent to VoiceOver.
+        button.setAccessibilityLabel(label)
+    }
+
+    /// Pinned to the glyph's point size, so the icon does not change size with state.
+    private func symbol(_ name: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Wallspan")?
+            .withSymbolConfiguration(BrandGlyph.symbolConfiguration)
         image?.isTemplate = true
-        statusItem.button?.image = image
+        return image
     }
 
     // MARK: - menu
