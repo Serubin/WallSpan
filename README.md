@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/wallspan-banner-dark.svg">
+    <img src="brand/wallspan-banner-light.svg" alt="Wallspan — one wallpaper, across every display" width="820">
+  </picture>
+</p>
+
 # wallspan
 
 A replacement for aging paid alternatives for applying multi monitor spanning wallpapers.

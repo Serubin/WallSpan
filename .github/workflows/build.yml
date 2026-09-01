@@ -85,6 +85,8 @@ jobs:
           codesign --verify --deep --strict "$APP"
           test -x "$APP/Contents/MacOS/Wallspan"
           test -x "$APP/Contents/Helpers/wallspan"
+          # Catches the copy being reordered after codesign, which strips it from the seal.
+          test -f "$APP/Contents/Resources/AppIcon.icns"
           for want in arm64 x86_64; do
             lipo -archs "$APP/Contents/MacOS/Wallspan" | grep -qw "$want" \
               || { echo "::error::$want missing from the app binary"; exit 1; }
@@ -110,6 +112,8 @@ jobs:
           mkdir -p "dist/$NAME"
           cp '${{ steps.bin.outputs.path }}' "dist/$NAME/wallspan"
           cp README.md LICENSE "dist/$NAME/"
+          # The README's banner is a repo-relative path, so it dangles without this.
+          cp -R brand "dist/$NAME/"
           # tar, not a bare binary: GitHub's artifact upload does not preserve the
           # executable bit, so a raw upload arrives chmod 644 and will not run.
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"

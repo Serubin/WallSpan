@@ -39,6 +39,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 cp "$BIN/WallspanApp" "$APP/Contents/MacOS/Wallspan"
 cp "$BIN/wallspan" "$APP/Contents/Helpers/wallspan"
 
+# Committed, not generated here: Scripts/make-icon.sh needs librsvg, which CI lacks.
+test -f brand/AppIcon.icns || { echo "brand/AppIcon.icns missing — Scripts/make-icon.sh" >&2; exit 1; }
+# Before codesign, or the resource is unsealed and --verify below fails.
+cp brand/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -49,6 +54,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>     <string>Wallspan</string>
     <key>CFBundleExecutable</key>      <string>Wallspan</string>
     <key>CFBundleIdentifier</key>      <string>net.serubin.wallspan.app</string>
+    <!-- Not CFBundleIconName: that needs an Assets.car, which SwiftPM cannot produce. -->
+    <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>${VERSION#v}</string>
     <key>CFBundleVersion</key>         <string>$SHORT</string>
