@@ -1,0 +1,115 @@
+name: tap
+
+# Bumps the wallspan cask and formula in Serubin/homebrew-formula.
+#
+# This hangs off `release: published` rather than off the build that produced the assets,
+# because release.yml deliberately stops at a draft: GitHub creates the tag, and makes the
+# assets publicly downloadable, only when a human publishes it. A bump wired into the build
+# would be pointing the tap at a URL that does not resolve yet.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# Two releases published close together would race on the tap push. Never cancelled — a
+# cancelled run may already have pushed.
+concurrency:
+  group: tap
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Prereleases stay off the tap. `brew install` has no way to ask for one, so publishing
+    # a prerelease here would quietly make it what everybody installs.
+    if: github.repository == 'Serubin/WallSpan' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      # Fail before anything is downloaded or cloned. The alternative is finding the secret
+      # missing at the push, with the release already public and the tap left stale.
+      - name: Require tap token
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "${TAP_GITHUB_TOKEN}" ]; then
+            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-formula and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/WallSpan"
+            exit 1
+          fi
+
+      - name: Download and verify the assets
+        id: assets
+        # Through env rather than interpolated into the script, matching release.yml: a tag
+        # name pasted into bash is a quote away from being a command.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          ZIP="Wallspan-$V.zip"
+          TARBALL="wallspan-$V-universal.tar.gz"
+
+          gh release download "$TAG" --dir assets \
+            --pattern "$ZIP" --pattern "$TARBALL" --pattern SHA256SUMS.txt
+
+          # SHA256SUMS.txt was written by the build from the same bytes it uploaded, so this
+          # checks the round trip through GitHub rather than recomputing a digest and then
+          # trusting whatever came back. --ignore-missing because the bare binary, which is
+          # listed in the file, is not one of the assets fetched here.
+          ( cd assets && sha256sum --ignore-missing -c SHA256SUMS.txt )
+
+          ZIP_SHA256="$(awk -v f="$ZIP" '$2 == f { print $1 }' assets/SHA256SUMS.txt)"
+          TAR_SHA256="$(awk -v f="$TARBALL" '$2 == f { print $1 }' assets/SHA256SUMS.txt)"
+          # An asset renamed upstream would otherwise write an empty sha256 into the tap,
+          # which fails much later and much less legibly.
+          for pair in "zip:$ZIP_SHA256" "tarball:$TAR_SHA256"; do
+            case "$pair" in
+              *:) echo "::error::no checksum for the ${pair%%:*} in SHA256SUMS.txt"; exit 1 ;;
+            esac
+          done
+
+          {
+            echo "version=$V"
+            echo "zip_sha256=$ZIP_SHA256"
+            echo "tar_sha256=$TAR_SHA256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bump the tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          V: ${{ steps.assets.outputs.version }}
+          ZIP_SHA256: ${{ steps.assets.outputs.zip_sha256 }}
+          TAR_SHA256: ${{ steps.assets.outputs.tar_sha256 }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/Serubin/homebrew-formula.git" tap
+          cd tap
+
+          # The cask interpolates #{version} into its url, so only these two lines move.
+          sed -i \
+            -e "s|^  version \".*\"$|  version \"${V}\"|" \
+            -e "s|^  sha256 \".*\"$|  sha256 \"${ZIP_SHA256}\"|" \
+            Casks/wallspan.rb
+
+          # The formula has no `version` stanza — Homebrew derives it from the url — so the
+          # url line is rewritten whole rather than patched in place.
+          sed -i \
+            -e "s|^  url \".*\"$|  url \"https://github.com/Serubin/WallSpan/releases/download/v${V}/wallspan-${V}-universal.tar.gz\"|" \
+            -e "s|^  sha256 \".*\"$|  sha256 \"${TAR_SHA256}\"|" \
+            Formula/wallspan.rb
+
+          # Re-publishing the same release should be a no-op, not an empty commit.
+          if git diff --quiet; then
+            echo "tap already at $V"
+            exit 0
+          fi
+
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "wallspan ${V}" Casks/wallspan.rb Formula/wallspan.rb
+          git push
+
+          echo "### Tap bumped to wallspan $V" >> "$GITHUB_STEP_SUMMARY"
