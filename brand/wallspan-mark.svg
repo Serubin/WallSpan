@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 232 126" width="232" height="126" role="img" aria-label="Wallspan">
+  <defs><linearGradient id="f" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#1E3A6E"></stop><stop offset="0.5" stop-color="#3D7BE8"></stop><stop offset="1" stop-color="#9CC2F8"></stop></linearGradient>
+    <clipPath id="p1"><rect x="0" y="20" width="62" height="86" rx="8"></rect></clipPath>
+    <clipPath id="p2"><rect x="74" y="2" width="84" height="122" rx="8"></rect></clipPath>
+    <clipPath id="p3"><rect x="170" y="32" width="62" height="62" rx="8"></rect></clipPath>
+  </defs>
+  <g clip-path="url(#p1)"><rect width="232" height="126" fill="url(#f)"></rect></g>
+  <g clip-path="url(#p2)"><rect width="232" height="126" fill="url(#f)"></rect></g>
+  <g clip-path="url(#p3)"><rect width="232" height="126" fill="url(#f)"></rect></g>
+</svg>
