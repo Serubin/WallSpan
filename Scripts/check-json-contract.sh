@@ -40,6 +40,26 @@ if "error" in d:
     fi
 }
 
+# A payload's keys, checked by name. Removing one is a breaking change the schema integer
+# is supposed to announce, so it has to fail here rather than in someone's front-end.
+expect_fields() {
+    local key="$1"; shift
+    local cmd="$1"; shift
+    local out
+    out="$("$BIN" $cmd --json 2>/dev/null)"
+    if printf '%s' "$out" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)[sys.argv[1]]
+missing = [f for f in sys.argv[2:] if f not in d]
+assert not missing, f"missing {missing}"
+' "$key" "$@" 2>/dev/null; then
+        echo "  ok        $cmd --json  -> has $*"
+    else
+        echo "  FAIL      $cmd --json  should carry: $*"
+        fails=$((fails + 1))
+    fi
+}
+
 # Refused, but still as an envelope.
 expect_refused() {
     local out rc
@@ -55,6 +75,10 @@ expect_refused() {
 
 echo "read-only:"
 expect_envelope version   version
+# `version` is the probe every front-end runs first, and the only payload guaranteed to
+# come back fully populated on a machine with no display — so it is the one whose fields
+# are worth naming outright.
+expect_fields version "version" version channel commit schema commands
 expect_envelope layout    info
 expect_envelope layout    layout show
 expect_envelope sets      layout list

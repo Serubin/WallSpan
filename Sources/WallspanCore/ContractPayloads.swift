@@ -12,13 +12,24 @@ public enum Contract {}
 extension Contract {
     public struct VersionReport: Codable {
         public var version: String
+        /// How the build was produced: `release`, `snapshot`, `dev`, or `local`. For
+        /// display and bug reports — gating on it would strand a user running a snapshot.
+        public var channel: String
+        /// Short commit the build came from, so a report names a tree rather than a
+        /// version. Empty for an unstamped local build.
+        public var commit: String
         public var schema: Int
         /// Lets a front-end feature-detect without a schema bump — the mechanism that
         /// makes "additive changes do not bump" workable for a caller older than the CLI.
         public var commands: [String]
 
-        public init(version: String, schema: Int, commands: [String]) {
+        public init(
+            version: String, channel: String, commit: String, schema: Int,
+            commands: [String]
+        ) {
             self.version = version
+            self.channel = channel
+            self.commit = commit
             self.schema = schema
             self.commands = commands
         }

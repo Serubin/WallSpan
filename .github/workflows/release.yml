@@ -1,0 +1,174 @@
+name: release
+
+# Dispatch only. Builds and verifies a ref, then leaves a draft release for review — the
+# git tag is created by GitHub when that draft is published, so nothing is ever tagged
+# that has not built, and abandoning a draft leaves no ref behind.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to release
+        required: true
+        default: main
+      version:
+        description: Version to release, without the leading v (e.g. 0.2.0)
+        required: true
+      prerelease:
+        description: Mark the release as a prerelease
+        type: boolean
+        default: false
+      allow_unmerged:
+        description: Allow a ref that is not an ancestor of main
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Validate
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Resolved once, and every later step uses the SHA rather than the ref. A branch
+          # name would let the release drift to whatever landed while the build was running.
+          SHA="$(git rev-parse HEAD)"
+          TAG="v$VERSION"
+
+          case "$VERSION" in
+            v*) echo "::error::drop the leading v: pass $VERSION without it"; exit 1 ;;
+          esac
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::$VERSION is not a semver version"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG already exists"
+            exit 1
+          fi
+          # Drafts included: a draft holds the tag name reserved, and a second one would
+          # quietly race the first to create the tag.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::a release for $TAG already exists (it may be a draft)"
+            exit 1
+          fi
+
+          # The tree has to already claim the version it is being tagged as. This is what
+          # keeps the post-release bump of baseVersion from being forgotten.
+          BASE="$(sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p' Sources/WallspanCore/Version.swift)"
+          CORE="${VERSION%%-*}"
+          if [ "$BASE" != "$CORE" ]; then
+            echo "::error::Version.swift says baseVersion $BASE, but this would tag $CORE"
+            exit 1
+          fi
+
+          if [ '${{ inputs.allow_unmerged }}' != true ]; then
+            # Explicit refspec: checkout was given a ref, not a branch, so there is no
+            # guarantee refs/remotes/origin/main exists to compare against.
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            if ! git merge-base --is-ancestor "$SHA" origin/main; then
+              echo "::error::$SHA is not an ancestor of main; re-run with allow_unmerged to override"
+              exit 1
+            fi
+          fi
+
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "releasing $TAG from $SHA"
+
+      - uses: ./.github/actions/build
+        id: build
+        with:
+          channel: release
+          version: ${{ inputs.version }}
+          sha: ${{ steps.check.outputs.sha }}
+
+      - name: Compose the release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          NAME="wallspan-${{ steps.build.outputs.slug }}-universal"
+          {
+            Scripts/changelog.sh --to '${{ steps.check.outputs.sha }}' \
+              --repo '${{ github.repository }}'
+            cat <<NOTES
+
+          ---
+
+          Universal binary (arm64 + x86_64), macOS 14+.
+
+          \`\`\`sh
+          tar -xzf $NAME.tar.gz
+          cd $NAME
+          xattr -c wallspan   # unsigned: macOS quarantines downloads
+          ./wallspan info
+          \`\`\`
+
+          \`$NAME\` is the same binary without the tarball, for an install script or a
+          formula. A downloaded file carries no executable bit, so it needs \`chmod +x\`.
+
+          \`Wallspan.app\` is the menu bar app; it bundles the same CLI and prefers
+          whichever \`wallspan\` is on your PATH.
+
+          \`\`\`sh
+          unzip $(basename '${{ steps.build.outputs.app-zip }}')
+          xattr -dr com.apple.quarantine Wallspan.app
+          open Wallspan.app
+          \`\`\`
+
+          Neither is signed or notarised, so Gatekeeper blocks them until the \`xattr\`
+          lines above.
+
+          Verify what you downloaded:
+
+          \`\`\`sh
+          shasum -c SHA256SUMS.txt
+          \`\`\`
+          NOTES
+          } > dist/NOTES.md
+          cat dist/NOTES.md
+
+      - name: Draft the release
+        # `gh`, not a third-party action: this job holds contents:write, and the fewer
+        # things that run inside it holding that, the better.
+        #
+        # --target takes the resolved SHA. GitHub creates the tag from it at publish time,
+        # so a branch name here would tag wherever that branch had moved to by then.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ARGS=(--draft
+                --title '${{ steps.check.outputs.tag }}'
+                --target '${{ steps.check.outputs.sha }}'
+                --notes-file dist/NOTES.md)
+          if [ '${{ inputs.prerelease }}' = true ]; then ARGS+=(--prerelease); fi
+
+          gh release create '${{ steps.check.outputs.tag }}' "${ARGS[@]}" \
+            '${{ steps.build.outputs.tarball }}' \
+            '${{ steps.build.outputs.binary }}' \
+            '${{ steps.build.outputs.app-zip }}' \
+            '${{ steps.build.outputs.checksums }}'
+
+          echo "### Draft release ${{ steps.check.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built from \`${{ steps.check.outputs.sha }}\`. The tag is created when you publish it." >> "$GITHUB_STEP_SUMMARY"
+          gh release view '${{ steps.check.outputs.tag }}' --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

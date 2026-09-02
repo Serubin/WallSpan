@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No tag trigger: releases go through release.yml, which builds and verifies a ref before
+# any tag exists. A draft release's tag is created when it is published, and a tag trigger
+# here would answer that by building and releasing the same commit a second time.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A superseded PR push is dead work; a merge's snapshot is the artifact for that commit
+  # and nothing else will produce it, so it runs to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    # macos-latest ships full Xcode, which the universal build needs: --arch x2 goes
+    # through xcbuild, which Command Line Tools alone does not provide.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The version scheme counts commits since the last v* tag; a shallow clone has
+          # neither the tags nor the history to count.
+          fetch-depth: 0
+
+      - name: Pick the channel
+        id: channel
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo "name=dev" >> "$GITHUB_OUTPUT"
+            echo "pr=${{ github.event.number }}" >> "$GITHUB_OUTPUT"
+            # The PR head, not github.sha: on a pull_request event that is a throwaway
+            # merge commit no one can check out, and the hash has to name a commit the
+            # author recognises.
+            echo "sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            echo "retention=14" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=snapshot" >> "$GITHUB_OUTPUT"
+            echo "pr=" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "retention=90" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./.github/actions/build
+        id: build
+        with:
+          channel: ${{ steps.channel.outputs.name }}
+          pr-number: ${{ steps.channel.outputs.pr }}
+          sha: ${{ steps.channel.outputs.sha }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wallspan-${{ steps.build.outputs.slug }}
+          # The bare binary is deliberately absent: upload-artifact re-zips without the
+          # executable bit, so it would arrive unrunnable. The tarball preserves it.
+          path: |
+            ${{ steps.build.outputs.tarball }}
+            ${{ steps.build.outputs.app-zip }}
+            ${{ steps.build.outputs.checksums }}
+          if-no-files-found: error
+          retention-days: ${{ steps.channel.outputs.retention }}
