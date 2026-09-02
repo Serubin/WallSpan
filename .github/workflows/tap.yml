@@ -1,6 +1,6 @@
 name: tap
 
-# Bumps the wallspan cask and formula in Serubin/homebrew-formula.
+# Bumps the wallspan cask and formula in Serubin/homebrew-tap.
 #
 # This hangs off `release: published` rather than off the build that produced the assets,
 # because release.yml deliberately stops at a draft: GitHub creates the tag, and makes the
@@ -33,7 +33,7 @@ jobs:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           if [ -z "${TAP_GITHUB_TOKEN}" ]; then
-            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-formula and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/WallSpan"
+            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-tap and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/WallSpan"
             exit 1
           fi
 
@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 \
-            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/Serubin/homebrew-formula.git" tap
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/Serubin/homebrew-tap.git" tap
           cd tap
 
           # The cask interpolates #{version} into its url, so only these two lines move.
