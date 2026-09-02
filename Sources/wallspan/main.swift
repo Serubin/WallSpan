@@ -304,10 +304,14 @@ let subcommands = [
 
 func cmdVersion() {
     let report = Contract.VersionReport(
-        version: Wallspan.version, schema: JSONOutput.schema, commands: subcommands
+        version: Wallspan.version, channel: Wallspan.channel, commit: Wallspan.commit,
+        schema: JSONOutput.schema, commands: subcommands
     )
     if jsonMode { emit(report, as: "version") }
-    print("wallspan \(report.version)  (json schema \(report.schema))")
+    // A release says only its version; anything else names the channel it came from, so a
+    // bug report does not have to be read back out of the filename it was downloaded as.
+    let channel = report.channel == "release" ? "" : "\(report.channel), "
+    print("wallspan \(report.version)  (\(channel)json schema \(report.schema))")
 }
 
 func cmdApply() throws {

@@ -45,13 +45,19 @@ So a caller must:
 to feature-detect rather than to compare version strings — that is what keeps additive
 growth from needing a bump.
 
+`channel` and `commit` say how the binary was built (`release`, `snapshot`, `dev`, or
+`local` for an unstamped working tree) and which commit it came from. They exist so a bug
+report names a tree rather than a version, and are for display only — a caller that gates
+on `channel` strands anyone running a snapshot, which is exactly the audience most worth
+hearing from. `commit` is empty for a local build.
+
 Dates are ISO-8601 strings, not Foundation reference-date numbers.
 
 ## Commands
 
 | command | payload key | notes |
 |---|---|---|
-| `version --json` | `version` | `{version, schema, commands[]}`. Also the probe. |
+| `version --json` | `version` | `{version, channel, commit, schema, commands[]}`. Also the probe. |
 | `info --json` | `layout` | Same payload as `layout show --json`. |
 | `layout show --json` | `layout` | Displays, union, gaps, coverage, fingerprint. |
 | `layout list --json` | `sets` | Calibrated display combinations. `[]` when none — not an error. |
@@ -170,7 +176,9 @@ $ wallspan version --json
 {
   "schema" : 1,
   "version" : {
+    "channel" : "release",
     "commands" : [ "info", "apply", "preview", "cycle", … ],
+    "commit" : "1a2b3c4",
     "schema" : 1,
     "version" : "0.1.0"
   }

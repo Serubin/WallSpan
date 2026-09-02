@@ -223,6 +223,28 @@ swift build -c release
 
 Needs only the Swift toolchain from Command Line Tools — no Xcode, no code signing.
 
+## Releases
+
+Every build says which of three channels it came from, so an installed copy can be traced
+back to a commit. `wallspan version` prints it.
+
+| channel | example | where it comes from |
+|---|---|---|
+| `release` | `0.2.0` | a tagged release, on the [releases page](../../releases) |
+| `snapshot` | `0.2.0-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact |
+| `dev` | `0.2.0-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact |
+
+A plain `swift build` reports the bare version and channel `local`.
+
+A release ships four assets: the CLI as a tarball, the same CLI as a bare binary, the
+`Wallspan.app` bundle, and `SHA256SUMS.txt` to check them with. Nothing is signed or
+notarised, so Gatekeeper blocks all of it until you clear the quarantine attribute — each
+release's notes carry the exact commands.
+
+Releases are cut by running the `release` workflow against a ref. It builds and verifies
+first, then leaves a draft for review; the git tag is created only when that draft is
+published.
+
 ## Known limits
 
 - **Per-Space wallpaper.** macOS keeps a separate wallpaper per Space, and setting one only

@@ -1,0 +1,197 @@
+name: Build and package
+description: >
+  Stamps the version, builds the universal CLI and Wallspan.app, verifies both, and
+  packages the release assets. Shared by CI and the release workflow so the artifacts a
+  release ships are produced by exactly the steps that gated every PR.
+
+inputs:
+  channel:
+    description: release | snapshot | dev
+    required: true
+  version:
+    description: Explicit version, for the release channel. Derived otherwise.
+    required: false
+    default: ""
+  pr-number:
+    description: PR number, required for the dev channel.
+    required: false
+    default: ""
+  sha:
+    description: Commit to version against. Defaults to HEAD of the checkout.
+    required: false
+    default: HEAD
+
+outputs:
+  version:
+    description: The full version string this build reports.
+    value: ${{ steps.version.outputs.version }}
+  slug:
+    description: The version, safe for filenames.
+    value: ${{ steps.version.outputs.slug }}
+  tarball:
+    description: Path to the CLI tarball.
+    value: ${{ steps.package.outputs.tarball }}
+  binary:
+    description: Path to the bare CLI binary.
+    value: ${{ steps.package.outputs.binary }}
+  app-zip:
+    description: Path to the Wallspan.app zip.
+    value: ${{ steps.app.outputs.zip }}
+  checksums:
+    description: Path to SHA256SUMS.txt.
+    value: ${{ steps.package.outputs.checksums }}
+
+runs:
+  using: composite
+  steps:
+    - name: Show toolchain
+      shell: bash
+      run: swift --version
+
+    - name: Stamp the version
+      id: version
+      shell: bash
+      # Through env rather than interpolated into the script: `version` reaches here from
+      # a workflow_dispatch input, and an expression pasted into bash is a quote away from
+      # being a command. version.sh validates nothing — this is what keeps it honest.
+      env:
+        CHANNEL: ${{ inputs.channel }}
+        VERSION: ${{ inputs.version }}
+        PR: ${{ inputs.pr-number }}
+        SHA: ${{ inputs.sha }}
+      run: |
+        set -euo pipefail
+        ARGS=(--channel "$CHANNEL" --sha "$SHA" --stamp)
+        if [ -n "$VERSION" ]; then ARGS+=(--version "$VERSION"); fi
+        if [ -n "$PR" ]; then ARGS+=(--pr "$PR"); fi
+        Scripts/version.sh "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Build universal
+      shell: bash
+      run: swift build -c release --arch arm64 --arch x86_64
+
+    - name: Locate and verify the binary
+      id: bin
+      shell: bash
+      run: |
+        set -euo pipefail
+        BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/wallspan"
+        test -x "$BIN"
+        # A missing arch would otherwise ship silently as a single-arch build.
+        ARCHS="$(lipo -archs "$BIN")"
+        echo "archs: $ARCHS"
+        for want in arm64 x86_64; do
+          case " $ARCHS " in *" $want "*) ;; *) echo "::error::$want missing from $ARCHS"; exit 1;; esac
+        done
+        echo "path=$BIN" >> "$GITHUB_OUTPUT"
+
+    - name: Verify the stamp took
+      shell: bash
+      env:
+        BIN: ${{ steps.bin.outputs.path }}
+        WANT: ${{ steps.version.outputs.version }}
+      run: |
+        set -euo pipefail
+        GOT="$("$BIN" version --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"]["version"])')"
+        # An artifact whose filename and self-report disagree is worse than either being
+        # wrong, because only one of them is visible once it is installed.
+        [ "$GOT" = "$WANT" ] || { echo "::error::binary reports $GOT, expected $WANT"; exit 1; }
+        echo "$GOT"
+
+    - name: Smoke test
+      shell: bash
+      run: |
+        set -euo pipefail
+        BIN='${{ steps.bin.outputs.path }}'
+        # These assert "does not crash" - they exercise layout construction, config
+        # loading and JSON decode. Asserting on display counts here would be testing
+        # the runner's hardware, not wallspan.
+        "$BIN" help > /dev/null
+        "$BIN" config show
+        # `info` is the one that needs a display, and what a runner provides varies: no
+        # screens at all gives "no displays found", while a virtual display with no
+        # stable UUID gives "could not resolve a stable UUID". Both are wallspan
+        # reporting an environment it cannot serve, which is the correct answer here.
+        #
+        # So assert the property actually wanted - it does not crash - rather than one
+        # message: exit 0, or exit 1 with a `fail()` line on stderr. A signal death
+        # (128+n) or any other exit code still fails the step.
+        if out="$("$BIN" info 2>&1)"; then
+          printf '%s\n' "$out"
+        else
+          status=$?
+          printf '%s\n' "$out"
+          test "$status" -eq 1
+          grep -q '^error: ' <<<"$out"
+        fi
+
+    - name: Check the --json contract
+      # The contract is what the menu bar app parses, and the app is released on its own
+      # schedule - so a field quietly dropped here is only found by a user whose app
+      # stops working. Shape is asserted, not values: a runner has no display.
+      shell: bash
+      run: Scripts/check-json-contract.sh '${{ steps.bin.outputs.path }}'
+
+    - name: Build Wallspan.app
+      id: app
+      shell: bash
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        BUNDLE_VERSION: ${{ steps.version.outputs.bundle_version }}
+      run: |
+        set -euo pipefail
+        # --version, not the script's `git describe` fallback: stamping dirtied the tree,
+        # so a describe would brand every CI build `-dirty`.
+        Scripts/make-app.sh --universal \
+          --version "$VERSION" --build-version "$BUNDLE_VERSION"
+        APP=dist/Wallspan.app
+        # The bundle is what users double-click, so a broken signature or a missing
+        # helper has to fail here rather than on their machine.
+        codesign --verify --deep --strict "$APP"
+        test -x "$APP/Contents/MacOS/Wallspan"
+        test -x "$APP/Contents/Helpers/wallspan"
+        # Catches the copy being reordered after codesign, which strips it from the seal.
+        test -f "$APP/Contents/Resources/AppIcon.icns"
+        for want in arm64 x86_64; do
+          lipo -archs "$APP/Contents/MacOS/Wallspan" | grep -qw "$want" \
+            || { echo "::error::$want missing from the app binary"; exit 1; }
+        done
+        echo "zip=$(ls dist/Wallspan-*.zip)" >> "$GITHUB_OUTPUT"
+
+    - name: Package
+      id: package
+      shell: bash
+      env:
+        SLUG: ${{ steps.version.outputs.slug }}
+        BIN: ${{ steps.bin.outputs.path }}
+        APP_ZIP: ${{ steps.app.outputs.zip }}
+      run: |
+        set -euo pipefail
+        NAME="wallspan-$SLUG-universal"
+        ZIP="$(basename "$APP_ZIP")"
+
+        # Staged under dist/stage so the tarball's root directory and the bare binary can
+        # share a name without one being copied inside the other.
+        mkdir -p "dist/stage/$NAME"
+        cp "$BIN" "dist/stage/$NAME/wallspan"
+        cp README.md LICENSE "dist/stage/$NAME/"
+        # The README's banner is a repo-relative path, so it dangles without this.
+        cp -R brand "dist/stage/$NAME/"
+        # tar, not a bare binary: neither GitHub's artifact upload nor a browser download
+        # preserves the executable bit, so an unpacked binary arrives chmod 644.
+        tar -C dist/stage -czf "dist/$NAME.tar.gz" "$NAME"
+        # Shipped alongside anyway, for an install script or a Homebrew formula that would
+        # rather not unpack a tarball. It needs a chmod, and the release notes say so.
+        cp "$BIN" "dist/$NAME"
+
+        # Bare filenames, so `shasum -c SHA256SUMS.txt` works in whatever directory the
+        # assets were downloaded into.
+        ( cd dist && shasum -a 256 "$NAME.tar.gz" "$NAME" "$ZIP" > SHA256SUMS.txt )
+        cat dist/SHA256SUMS.txt
+
+        {
+          echo "name=$NAME"
+          echo "tarball=dist/$NAME.tar.gz"
+          echo "binary=dist/$NAME"
+          echo "checksums=dist/SHA256SUMS.txt"
+        } >> "$GITHUB_OUTPUT"

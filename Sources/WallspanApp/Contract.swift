@@ -59,12 +59,18 @@ enum Contract {
 
     struct Version: Decodable {
         var version: String
+        var channel: String
+        var commit: String
         var schema: Int
         var commands: [String]
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: AnyKey.self)
             version = c.or("version", "unknown")
+            // Defaulted, not required: a CLI older than these fields is still a perfectly
+            // usable CLI, and this app is routinely the newer half of the pair.
+            channel = c.or("channel", "")
+            commit = c.or("commit", "")
             // 0 fails the compatibility check, which is the right answer for output that
             // did not carry a schema at all.
             schema = c.or("schema", 0)
@@ -72,6 +78,14 @@ enum Contract {
         }
 
         func supports(_ command: String) -> Bool { commands.contains(command) }
+
+        /// `0.2.0-dev.pr42+g1a2b3c4 (dev, schema 1)`. The channel is dropped for a release
+        /// and for a CLI too old to report one — in both cases there is nothing to warn
+        /// about, and an empty parenthetical would just look broken.
+        var summary: String {
+            let qualifier = (channel.isEmpty || channel == "release") ? "" : "\(channel), "
+            return "\(version) (\(qualifier)schema \(schema))"
+        }
     }
 
     struct Status: Decodable {

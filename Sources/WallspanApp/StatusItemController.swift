@@ -60,7 +60,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             // this is the fastest way to see which of several wallspans it settled on.
             let line: String
             if let resolved {
-                line = "wallspan \(resolved.version.version) (schema \(resolved.version.schema))"
+                line = "wallspan \(resolved.version.summary)"
                     + " from \(resolved.source.rawValue): \(resolved.url.path)"
             } else {
                 line = "no usable wallspan binary found"
@@ -583,7 +583,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         lines.append("App \(appVersion ?? "development build")")
         if let resolution {
-            lines.append("CLI \(resolution.version.version) (schema \(resolution.version.schema))")
+            lines.append("CLI \(resolution.version.summary)")
             lines.append("Using the copy from \(resolution.source.rawValue):")
             lines.append(resolution.url.path)
             for (url, reason) in resolution.rejected {

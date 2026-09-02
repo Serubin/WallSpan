@@ -6,25 +6,42 @@
 # later without changing the layout.
 #
 # usage: Scripts/make-app.sh [--universal] [--out DIR]
+#                            [--version STRING] [--build-version N.N.N]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 CONFIG=release
 OUT=dist
+VERSION=""
+SHORT=""
 ARCH_FLAGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --universal) ARCH_FLAGS=(--arch arm64 --arch x86_64); shift ;;
         --out) OUT="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --build-version) SHORT="$2"; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
 
-VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo 0.0.0)"
-# CFBundleVersion must be a dot-separated number; a describe like v0.1.0-3-gabc1234 is not.
-SHORT="$(printf '%s' "$VERSION" | sed 's/^v//; s/-.*//')"
-case "$SHORT" in ''|*[!0-9.]*) SHORT=0.0.0 ;; esac
+# Scripts/version.sh is the authority when it has run — CI stamps BuildInfo.swift before
+# building, which leaves the tree dirty, so `describe --dirty` would brand every CI build
+# `-dirty`. The describe stays as the answer for a hand build that passed no version.
+if [ -z "$VERSION" ]; then
+    VERSION="$(git describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null \
+        || echo 0.0.0)"
+fi
+if [ -z "$SHORT" ]; then
+    # CFBundleVersion must be a dot-separated number; a describe like v0.1.0-3-gabc1234
+    # is not.
+    SHORT="$(printf '%s' "$VERSION" | sed 's/^v//; s/[-+].*//')"
+    case "$SHORT" in ''|*[!0-9.]*) SHORT=0.0.0 ;; esac
+fi
+
+# `+` is fine in a version string but not in a filename anyone has to type or checksum.
+SLUG="${VERSION//+/.}"
 
 swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}
 BIN="$(swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --show-bin-path)"
@@ -78,7 +95,7 @@ codesign --verify --deep --strict "$APP"
 
 # ditto, not zip: zip mangles a signed bundle's symlinks and metadata, and the signature
 # then fails to verify on the machine that unpacks it.
-ZIP="$OUT/Wallspan-$VERSION.zip"
+ZIP="$OUT/Wallspan-$SLUG.zip"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
