@@ -28,6 +28,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// One controller for the life of the app, so two calibration windows cannot both be
     /// pausing and resuming cycling.
     private let calibration = CalibrationWindowController()
+    private let about = AboutWindowController()
     private var refreshTimer: Timer?
     /// Faster polling only while the menu is open — the countdown is visible then, and
     /// invisible the rest of the time.
@@ -71,6 +72,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 self?.resolution = resolved
                 // Before refresh(), which returns early when nothing resolved.
                 self?.updateButton()
+                self?.updateAbout()
                 self?.refresh()
             }
         }
@@ -94,6 +96,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 self?.agent = agent
                 self?.layout = layout
                 self?.updateButton()
+                self?.updateAbout()
                 self?.repairAgentIfBroken()
                 if self?.menuIsOpen == true { self?.rebuild() }
             }
@@ -190,11 +193,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func rebuild() {
         menu.removeAllItems()
 
-        guard let resolution else {
+        guard resolution != nil else {
             menu.addItem(disabled("wallspan not found"))
             menu.addItem(.separator())
             menu.addItem(item("Look Again", #selector(lookAgain)))
-            menu.addItem(item("About Wallspan…", #selector(showAbout)))
+            menu.addItem(item("About Wallspan…", #selector(openAbout)))
             menu.addItem(.separator())
             menu.addItem(item("Quit Wallspan", #selector(quit), key: "q"))
             return
@@ -242,9 +245,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addPlaylistItems()
         menu.addItem(.separator())
 
-        menu.addItem(item("Restore Original Wallpaper", #selector(restore)))
-        menu.addItem(.separator())
-
         addSwitchBinaryItemIfUseful()
 
         let openAtLogin = item("Open Wallspan at Login", #selector(toggleLoginItem))
@@ -265,11 +265,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addDisplaysItem()
         addCommandLineToolItem()
 
-        if agent?.logPath != nil {
-            menu.addItem(item("Open Log", #selector(openLog)))
-        }
         menu.addItem(.separator())
-        menu.addItem(item("About Wallspan…", #selector(showAbout)))
+        menu.addItem(item("About Wallspan…", #selector(openAbout)))
         menu.addItem(item("Quit Wallspan", #selector(quit), key: "q"))
     }
 
@@ -335,16 +332,30 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         calibration.show(runner: runner)
     }
 
+    /// Offered only when there is nothing to reach `wallspan` by. A CLI already resolved
+    /// from PATH or a standard location — Homebrew's formula, say — is the thing this item
+    /// would install, and linking a second copy over it would only be a way to end up
+    /// running the wrong one.
     private func addCommandLineToolItem() {
         guard let bundled = BinaryResolver.bundledBinary else { return }
+
+        let installed: String?
         switch CommandLineTool.state(bundled: bundled) {
         case .installed:
-            let entry = disabled("Command Line Tool Installed")
-            entry.toolTip = CommandLineTool.destination.path
-            menu.addItem(entry)
+            installed = CommandLineTool.destination.path
         case .notInstalled, .occupiedBy:
-            menu.addItem(item("Install Command Line Tool…", #selector(installCommandLineTool)))
+            // Resolved from anywhere but the bundle means `wallspan` already answers by
+            // name, whoever put it there.
+            installed = resolution.flatMap { $0.source == .bundled ? nil : $0.url.path }
         }
+
+        guard let path = installed else {
+            menu.addItem(item("Install CLI…", #selector(installCommandLineTool)))
+            return
+        }
+        let entry = disabled("CLI Installed")
+        entry.toolTip = "wallspan is already installed at \(path)"
+        menu.addItem(entry)
     }
 
     private func addHeader() {
@@ -457,10 +468,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         perform([resuming ? "resume" : "pause"], describing: resuming ? "resume" : "pause")
     }
 
-    @objc private func restore() {
-        perform(["restore"], describing: "restore the original wallpaper")
-    }
-
     @objc private func setInterval(_ sender: NSMenuItem) {
         guard let flag = sender.representedObject as? String else { return }
         perform(["config", "set", "--interval", flag], describing: "change the interval")
@@ -493,11 +500,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             perform(["agent", "install", "--binary", resolution.url.path],
                     describing: "start background cycling")
         }
-    }
-
-    @objc private func openLog() {
-        guard let path = agent?.logPath else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     @objc private func lookAgain() {
@@ -560,7 +562,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         if let failure = CommandLineTool.install(bundled: bundled, replacing: replacing) {
-            report(failure, while: "install the command line tool")
+            report(failure, while: "install the CLI")
             return
         }
 
@@ -574,26 +576,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         rebuild()
     }
 
-    @objc private func showAbout() {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Wallspan"
+    @objc private func openAbout() { showAbout() }
 
-        var lines: [String] = []
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        lines.append("App \(appVersion ?? "development build")")
-        if let resolution {
-            lines.append("CLI \(resolution.version.summary)")
-            lines.append("Using the copy from \(resolution.source.rawValue):")
-            lines.append(resolution.url.path)
-            for (url, reason) in resolution.rejected {
-                lines.append("Skipped \(url.path) — \(reason)")
-            }
-        } else {
-            lines.append("No usable wallspan binary was found.")
-        }
-        alert.informativeText = lines.joined(separator: "\n")
-        alert.runModal()
+    private func updateAbout() {
+        about.update(info: .current(resolution: resolution, logPath: agent?.logPath))
+    }
+
+    /// Also the entry point for `--about`. Opens immediately even at launch, before the
+    /// binary probe and the first agent report land; `refresh` fills the window in.
+    func showAbout() {
+        about.show(info: .current(resolution: resolution, logPath: agent?.logPath))
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
