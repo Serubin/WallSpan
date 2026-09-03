@@ -21,9 +21,12 @@ enum LoginItem {
     static var state: State {
         switch SMAppService.mainApp.status {
         case .enabled: return .on
-        case .notRegistered: return .off
+        // `notFound` is not a broken install: it is what an app that has never been
+        // registered reports, on macOS 26 regardless of where the bundle lives and whether
+        // it carries Homebrew's quarantine flag. `register()` is the only honest test of
+        // whether a login item can be created here, and `set` passes its failure through.
+        case .notRegistered, .notFound: return .off
         case .requiresApproval: return .needsApproval
-        case .notFound: return .unavailable("the app is not where macOS expects it")
         @unknown default: return .unavailable("unknown login item state")
         }
     }

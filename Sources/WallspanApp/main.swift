@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--calibrate") {
             controller.showCalibration()
         }
+        // Same reason: the About window carries the binary-resolution diagnostics, and a
+        // menu item cannot be clicked from a terminal.
+        if CommandLine.arguments.contains("--about") {
+            controller.showAbout()
+        }
     }
 }
 
