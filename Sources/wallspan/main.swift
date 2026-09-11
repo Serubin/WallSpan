@@ -22,7 +22,7 @@ struct Args {
     /// every new option and silently drops the value when it is not. Booleans are stable.
     static let booleanFlags: Set<String> = [
         "dry-run", "sequential", "shuffle", "recursive", "no-recursive",
-        "revert", "purge", "help", "h", "json",
+        "revert", "purge", "help", "h", "json", "verbose",
     ]
 
     init(_ argv: [String]) {
@@ -247,19 +247,36 @@ func snapshotOriginalIfNeeded(_ state: inout WallspanState) {
 
 /// Renders and applies one image. Deliberately does NOT touch persisted state: the caller
 /// owns it, so there is exactly one load/save per operation.
+///
+/// `displays` restricts the *set* step to those placement UUIDs; nil means every display.
+/// Rendering is never restricted - `materialize` keys its cache on the whole layout's
+/// fingerprint and sweeps files the layout does not name, so a partial render set would
+/// thrash it.
 @discardableResult
 func applyOnce(
-    image: URL, layout: PhysicalLayout, dryRun: Bool, quiet: Bool = false
+    image: URL, layout: PhysicalLayout, dryRun: Bool, quiet: Bool = false,
+    displays: Set<String>? = nil
 ) throws -> [ApplyResult] {
     // A --json caller is parsing one object off stdout; prose interleaved with it is not
     // parseable, so every commentary path below is off in JSON mode whatever the caller asked.
     let quiet = quiet || jsonMode
     var loaded: SourceImage?
-    let results = try WallpaperApplier.materialize(source: image, layout: layout) {
-        let (source, rendered) = try renderSpan(image: image, layout: layout)
-        guard !rendered.isEmpty else { throw ApplyError.pngEncodeFailed(image) }
+    let rendered = try WallpaperApplier.materialize(source: image, layout: layout) {
+        let (source, screens) = try renderSpan(image: image, layout: layout)
+        guard !screens.isEmpty else { throw ApplyError.pngEncodeFailed(image) }
         loaded = source
-        return rendered
+        return screens
+    }
+    var results = rendered
+    if let wanted = displays {
+        let ids = Set(layout.entries.filter { wanted.contains($0.placement.uuid) }
+            .map(\.display.id))
+        results = rendered.filter { ids.contains($0.display.id) }
+        // A filter that matches nothing must not look like a successful apply: the caller
+        // records those displays as done, and an empty set would never be retried.
+        guard !results.isEmpty else {
+            throw ApplyError.noMatchingDisplays(requested: Array(wanted))
+        }
     }
     if !quiet {
         if let loaded { print("  \(describe(loaded))") }
@@ -270,9 +287,11 @@ func applyOnce(
     }
 
     if dryRun {
-        if !quiet {
+        // `rendered`, not `results`: a filter can empty the latter, and the whole render
+        // set is what landed on disk regardless.
+        if !quiet, let first = rendered.first {
             print("  --dry-run: desktop untouched. Files in "
-                  + results[0].url.deletingLastPathComponent().path)
+                  + first.url.deletingLastPathComponent().path)
         }
         return results
     }
@@ -719,8 +738,16 @@ final class Cycler {
     var applying = false
     /// Separate from `debounce`, or a display change would cancel a pending Space follow.
     var spaceDebounce: DispatchWorkItem?
-    /// Spaces get switched dozens of times an hour; log the follow once per image.
-    var spaceFollowLogged = false
+    /// Which `(display, Space)` pairs already hold `current`, so a switch back to a Space
+    /// costs nothing instead of a full `setDesktopImageURL`.
+    var coverage = Coverage()
+    /// Bumped whenever coverage is invalidated. An apply turns the run loop, so an
+    /// invalidation can land while one is in flight; recording its result afterwards would
+    /// re-assert the coverage that was just thrown away.
+    var coverageEpoch = 0
+    /// Verbose gate logging. Skips are the common case by design and would bury the
+    /// applies, which are the events worth seeing.
+    var logSkips = false
 
     init(layout: PhysicalLayout, config: CycleConfig, overrides: CycleOverrides) {
         self.layout = layout
@@ -777,6 +804,7 @@ final class Cycler {
         if interval != oldInterval {
             print("[\(timestamp())] config changed: interval -> \(ConfigStore.formatInterval(interval))")
             scheduleTimer()
+            coverage.setTTL(interval: interval)
         }
     }
 
@@ -831,12 +859,15 @@ final class Cycler {
     /// Returns the failure, if any, so the caller can put it in `status.json` — a front-end
     /// has no other way to see it, and the agent cannot raise a prompt.
     @discardableResult
-    func apply(_ image: URL, layout: PhysicalLayout) -> String? {
+    func apply(
+        _ image: URL, layout: PhysicalLayout, displays: Set<String>? = nil
+    ) -> String? {
         let wasApplying = applying
         applying = true
         defer { applying = wasApplying }
         do {
-            try applyOnce(image: image, layout: layout, dryRun: false, quiet: true)
+            try applyOnce(image: image, layout: layout, dryRun: false, quiet: true,
+                          displays: displays)
             return nil
         } catch {
             FileHandle.standardError.write("  failed: \(error)\n".data(using: .utf8)!)
@@ -914,7 +945,9 @@ final class Cycler {
         // it before misreports the wraparound tick.
         let position = "\(playlist!.index)/\(playlist!.order.count)"
         current = image
-        spaceFollowLogged = false
+        // A new image makes every Space stale, including the ones this is about to cover.
+        coverage.clear()
+        coverage.setTTL(interval: interval)
         print("[\(timestamp())] \(position)  \(image.lastPathComponent)")
 
         // Snapshot BEFORE applying, and persist before the desktop changes:
@@ -926,7 +959,7 @@ final class Cycler {
             try? StateStore.save(state)
         }
 
-        let failure = apply(image, layout: layout)
+        let failure = applyAndRecord(image, layout: layout)
         var status = StatusStore.load()
         status.position = position
         status.intervalSeconds = interval
@@ -968,16 +1001,57 @@ final class Cycler {
             self.layout = newLayout
             print("[\(timestamp())] display arrangement changed -> "
                   + "union \(Int(newLayout.unionMM.width))x\(Int(newLayout.unionMM.height))mm, re-rendering")
-            if let img = self.current { self.apply(img, layout: newLayout) }
+            if let img = self.current { self.applyAndRecord(img, layout: newLayout) }
         }
         debounce = work
         // Reconfiguration fires repeatedly per change; settle before reacting.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
     }
 
+    /// The Space in front of each display right now. A display CGS cannot answer for is
+    /// absent rather than keyed on a placeholder, so it stays unconditional.
+    ///
+    /// `placement.uuid` is the display's own UUID - `PhysicalLayoutStore.current()` builds
+    /// it from `uuid(for:)` and refuses a layout that lacks one - so it is what CGS wants.
+    func frontSpaces() -> [Coverage.Key] {
+        layout.entries.compactMap { entry in
+            SpaceTracker.currentSpace(displayUUID: entry.placement.uuid).map {
+                Coverage.Key(display: entry.placement.uuid, space: $0)
+            }
+        }
+    }
+
+    /// Applies, then records coverage for the Spaces the apply could actually reach.
+    ///
+    /// The snapshot is taken *before* the apply because the read-back turns the run loop
+    /// for up to five seconds: reading the front Spaces afterwards can name one the user
+    /// swiped to meanwhile, marking a Space covered that never received the image.
+    ///
+    /// Only the front Space per display, whatever `displays` asked for. A single
+    /// `setDesktopImageURL` cannot reach a Space that is not in front, so recording any
+    /// other would be a lie - and a Space left out simply gets applied when it is arrived
+    /// at, which is the whole contract of the follow.
+    @discardableResult
+    func applyAndRecord(
+        _ image: URL, layout: PhysicalLayout, displays: Set<String>? = nil
+    ) -> String? {
+        let reached = frontSpaces()
+        let epoch = coverageEpoch
+        let failure = apply(image, layout: layout, displays: displays)
+        guard failure == nil, epoch == coverageEpoch else { return failure }
+        for key in reached where displays?.contains(key.display) ?? true {
+            coverage.record(display: key.display, space: key.space)
+        }
+        return nil
+    }
+
     /// Re-applies the current image on arrival at a Space: `setDesktopImageURL` only ever
-    /// reached whichever Space was in front at the last tick. Unconditional, because
-    /// `desktopImageURL(for:)` reports one path for every Space and cannot show staleness.
+    /// reached whichever Space was in front at the last tick.
+    ///
+    /// Gated on `coverage`, because that call costs ~2.4s of CPU in WallpaperAgent and
+    /// WallpaperImageExtension whether or not the URL changed, and re-asserting a Space
+    /// that already holds the image is pure waste. Only the displays that actually need it
+    /// are set.
     func spaceChanged() {
         spaceDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -985,16 +1059,51 @@ final class Cycler {
             // Re-arm, not skip: the Space we arrived on still needs the image.
             guard !self.applying else { self.spaceChanged(); return }
             guard let img = self.current else { return }
-            if !self.spaceFollowLogged {
-                self.spaceFollowLogged = true
-                print("[\(timestamp())] space changed -> \(img.lastPathComponent)"
-                      + " (further switches on this image are silent)")
+            // Another user holds the console. Coverage recorded now would describe a
+            // session we are not on, and returning to ours clears it anyway.
+            guard SpaceTracker.isOnConsole else { return }
+
+            // Cannot tell Spaces apart, so re-assert every display as before.
+            guard SpaceTracker.isAvailable else {
+                print("[\(timestamp())] space changed -> \(img.lastPathComponent)")
+                self.applyAndRecord(img, layout: self.layout)
+                return
             }
-            self.apply(img, layout: self.layout)
+
+            self.coverage.prune()
+            // Read here rather than at notification time: only the Space in front now can
+            // be set, and any Space swiped past re-notifies when it is arrived at again.
+            let stale = self.frontSpaces().filter {
+                !self.coverage.holds(display: $0.display, space: $0.space)
+            }
+            guard !stale.isEmpty else {
+                if self.logSkips {
+                    print("[\(timestamp())] space changed -> already covered, skipped")
+                }
+                return
+            }
+
+            let displays = Set(stale.map(\.display))
+            print("[\(timestamp())] space changed -> \(img.lastPathComponent)"
+                  + " on \(displays.count) of \(self.layout.entries.count) display(s)")
+            self.applyAndRecord(img, layout: self.layout, displays: displays)
         }
         spaceDebounce = work
         // Outlasts the switch animation, and collapses a swipe across several Spaces.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Forgets which Spaces hold the image. macOS re-seeds a Space's wallpaper on changes
+    /// this process cannot see individually - a mode change that leaves the arrangement
+    /// identical raises no layout change - and a stale entry would keep the gate from ever
+    /// repairing that Space.
+    func invalidateCoverage(_ reason: String) {
+        // Epoch bumps even when the map is already empty, so an invalidation landing
+        // mid-apply still discards that apply's coverage instead of being a no-op.
+        coverageEpoch += 1
+        guard !coverage.isEmpty else { return }
+        coverage.clear()
+        print("[\(timestamp())] \(reason): Spaces will be re-asserted on arrival")
     }
 
     func timestamp() -> String {
@@ -1012,6 +1121,9 @@ var cycleLock: InstanceLock?
 func reconfigCallback(_ display: CGDirectDisplayID, _ flags: CGDisplayChangeSummaryFlags, _ ctx: UnsafeMutableRawPointer?) {
     // Ignore the "about to change" half of each notification pair.
     guard !flags.contains(.beginConfigurationFlag) else { return }
+    // Not inside layoutChanged: it returns early on an unchanged fingerprint, which a
+    // waking display resetting its per-Space wallpaper does not change.
+    cycler?.invalidateCoverage("displays reconfigured")
     cycler?.layoutChanged()
 }
 
@@ -1023,9 +1135,21 @@ func startFollowingSpaces() -> Bool {
     let app = NSApplication.shared
     // The policy the notification was measured under; the default `.prohibited` refuses.
     app.setActivationPolicy(.accessory)
-    NSWorkspace.shared.notificationCenter.addObserver(
+    let center = NSWorkspace.shared.notificationCenter
+    center.addObserver(
         forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
     ) { _ in cycler?.spaceChanged() }
+    // Each of these can reset a Space's wallpaper without any arrangement change, and
+    // returning from another console session invalidates the Space ids outright.
+    for (name, reason) in [
+        (NSWorkspace.didWakeNotification, "woke from sleep"),
+        (NSWorkspace.screensDidWakeNotification, "displays woke"),
+        (NSWorkspace.sessionDidBecomeActiveNotification, "session became active"),
+    ] {
+        center.addObserver(forName: name, object: nil, queue: .main) { _ in
+            cycler?.invalidateCoverage(reason)
+        }
+    }
     return true
 }
 
@@ -1063,6 +1187,8 @@ func cmdCycle() throws {
 
     let layout = try PhysicalLayoutStore.current()
     let c = Cycler(layout: layout, config: config, overrides: overrides)
+    c.logSkips = args.has("verbose")
+    c.coverage.setTTL(interval: c.interval)
     cycler = c
 
     print("cycling \(config.playlistDirectory!)")
@@ -1072,9 +1198,15 @@ func cmdCycle() throws {
              ? "  (from \(ConfigStore.url.lastPathComponent); re-read each tick)"
              : "  (--interval overrides config)"))
     let followsSpaces = startFollowingSpaces()
-    print(followsSpaces
-          ? "following Space changes: each Space gets the current wallpaper on arrival"
-          : "not a GUI session: Space changes will not be followed")
+    if !followsSpaces {
+        print("not a GUI session: Space changes will not be followed")
+    } else if SpaceTracker.isAvailable {
+        print("following Space changes: each Space gets the current wallpaper on arrival,"
+              + " and one already holding it is left alone")
+    } else {
+        print("following Space changes: each Space gets the current wallpaper on arrival"
+              + " (cannot identify the front Space, so every switch re-applies)")
+    }
     print("ctrl-c to stop; run `wallspan restore` to put your old wallpaper back\n")
 
     c.tick()
@@ -1339,10 +1471,11 @@ func usage() {
           PNGs and prints their paths without changing anything.
 
       wallspan cycle [directory] [--interval 15m] [--shuffle|--sequential]
-                     [--recursive|--no-recursive]
+                     [--recursive|--no-recursive] [--verbose]
           Walk a folder on an interval. Re-renders automatically if you rearrange
           or unplug a display. Runs in the foreground. With no arguments it reads
-          the config, and re-reads it every tick.
+          the config, and re-reads it every tick. --verbose also logs the Space
+          switches that needed no work.
 
     DRIVING A RUNNING CYCLER
       wallspan status
