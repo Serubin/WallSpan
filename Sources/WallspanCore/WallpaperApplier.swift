@@ -9,9 +9,12 @@ public enum ApplyError: Error, CustomStringConvertible {
     case pngEncodeFailed(URL)
     case setFailed(display: String, underlying: Error)
     case readBackMismatch(display: String, expected: String, actual: String?)
+    case noMatchingDisplays(requested: [String])
 
     public var description: String {
         switch self {
+        case .noMatchingDisplays(let r):
+            return "no attached display matches \(r.sorted().joined(separator: ", "))"
         case .pngEncodeFailed(let u):
             return "failed to encode PNG at \(u.path)"
         case .setFailed(let d, let e):
@@ -170,6 +173,22 @@ public enum WallpaperApplier {
             }
         }
 
+        // `desktopImageURL(for:)` answers for whichever Space is in front, so a switch
+        // during the poll makes it describe a Space we never set - unverifiable, not failed.
+        let spaceAtSet = Dictionary(
+            uniqueKeysWithValues: results.map {
+                ($0.display.id, PhysicalLayoutStore.uuid(for: $0.display.id)
+                    .flatMap(SpaceTracker.currentSpace(displayUUID:)))
+            }
+        )
+        func spaceMoved(_ id: CGDirectDisplayID) -> Bool {
+            guard let before = spaceAtSet[id] ?? nil,
+                  let uuid = PhysicalLayoutStore.uuid(for: id),
+                  let now = SpaceTracker.currentSpace(displayUUID: uuid)
+            else { return false }
+            return now != before
+        }
+
         // macOS commits the wallpaper store asynchronously and the delay varies with image
         // size and load, so poll until the read-back converges rather than sleeping once.
         let deadline = Date().addingTimeInterval(5)
@@ -192,12 +211,16 @@ public enum WallpaperApplier {
             if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
             pending.removeAll { r in
                 guard let screen = screensByID[r.display.id] else { return true }
+                // Dropped without converging: the read-back now describes another Space,
+                // so no further poll of this display can ever match.
+                if spaceMoved(r.display.id) { return true }
                 let actual = NSWorkspace.shared.desktopImageURL(for: screen)?.path
                 lastSeen[r.display.id] = actual
                 return actual == r.url.path
             }
         }
-        if let stuck = pending.first {
+        // Only a display still on the Space it was set on can be called stuck.
+        if let stuck = pending.first(where: { !spaceMoved($0.display.id) }) {
             throw ApplyError.readBackMismatch(
                 display: stuck.display.name, expected: stuck.url.path,
                 actual: lastSeen[stuck.display.id] ?? nil
