@@ -251,9 +251,18 @@ published.
 ## Known limits
 
 - **Per-Space wallpaper.** macOS keeps a separate wallpaper per Space, and setting one only
-  affects the Space you are currently on. `cycle` works around this by re-applying the
-  current image whenever you switch Spaces, so each Space catches up on arrival — but a
-  one-shot `wallspan apply` exits and cannot, so it reaches only the Space you ran it from.
+  affects the Space you are currently on. `cycle` works around this by applying the current
+  image to each Space on arrival — but a one-shot `wallspan apply` exits and cannot, so it
+  reaches only the Space you ran it from.
+
+  Setting a wallpaper costs macOS about 2.4s of CPU across `WallpaperAgent` and
+  `WallpaperImageExtension`, whatever the image, and it is not skipped when the wallpaper is
+  already the one being set. So `cycle` tracks which Spaces already hold the current image
+  and leaves those alone; without that, swiping between Spaces pins a couple of cores for as
+  long as you keep swiping. Identifying the front Space needs a private framework, and where
+  that is unavailable `cycle` says so at startup and falls back to re-applying every time.
+  Entries are re-asserted at least once per interval, so a Space that something else changed
+  behind our back catches up rather than staying wrong.
 - **Only one `cycle` runs at a time.** A second one exits immediately naming the pid that
   holds the lock, rather than fighting over the wallpaper and the saved playlist position.
 - **The render cache never evicts.** Every image-and-arrangement pair keeps full-size PNGs
