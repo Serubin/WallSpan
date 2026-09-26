@@ -119,12 +119,20 @@ configuration, so retuning is just an edit:
 
 ```json
 {
+  "idleDeferSeconds" : 5,
   "intervalSeconds" : 900,
   "playlistDirectory" : "/Users/you/Pictures/Backgrounds",
   "recursive" : false,
   "shuffle" : true
 }
 ```
+
+`idleDeferSeconds` holds a scheduled change back until you have stopped typing for that
+long, so the cost below is paid while you are away from the keyboard rather than in the
+middle of a sentence. It gives up and goes ahead after half an interval, or five minutes,
+whichever is sooner. It governs only the scheduled change: arriving at a Space, rearranging
+displays, `wallspan next` and resuming all apply at once. `--idle-defer off` disables it,
+on `config set` or on `cycle` for one run.
 
 A running agent notices changes within a few seconds — `wallspan config set --interval
 30m` takes effect without a restart. Logs go to `~/Library/Logs/wallspan.log`.
@@ -262,7 +270,14 @@ published.
   long as you keep swiping. Identifying the front Space needs a private framework, and where
   that is unavailable `cycle` says so at startup and falls back to re-applying every time.
   Entries are re-asserted at least once per interval, so a Space that something else changed
-  behind our back catches up rather than staying wrong.
+  behind our back catches up rather than staying wrong. Where that memory has been thrown
+  away wholesale — after a wake, a display change, or a user switch — the desktop is read
+  back first, which is about a thousand times cheaper than setting it again blind.
+
+  Almost all of that cost is macOS resolving security-scoped bookmarks, and none of it is
+  the image: format, byte size, pixel count and file location make no measurable difference,
+  and neither does re-using a path you have already set. Not making the call is the only
+  saving available, which is what the Space memory and `idleDeferSeconds` are both for.
 - **Only one `cycle` runs at a time.** A second one exits immediately naming the pid that
   holds the lock, rather than fighting over the wallpaper and the saved playlist position.
 - **The render cache never evicts.** Every image-and-arrangement pair keeps full-size PNGs

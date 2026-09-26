@@ -204,6 +204,9 @@ extension Contract {
         public var nextAt: Date?
         public var position: String?
         public var lastError: String?
+        /// Set while a due change waits for the user to stop typing, so a caller can
+        /// explain a `nextAt` that has passed instead of rendering it overdue.
+        public var deferredSince: Date?
 
         public init(config: CycleConfig, status: CycleStatus, imageCount: Int?, holder: pid_t?) {
             running = holder != nil
@@ -223,6 +226,8 @@ extension Contract {
                 : nil
             position = status.position
             lastError = status.lastError
+            // A dead cycler's last deferral is not still waiting, same reasoning as `nextAt`.
+            deferredSince = running ? status.deferredSince : nil
         }
     }
 
