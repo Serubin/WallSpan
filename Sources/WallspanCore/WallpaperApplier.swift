@@ -121,6 +121,37 @@ public enum WallpaperApplier {
         dir.appendingPathComponent("screen_\(uuid).png")
     }
 
+    /// Which of `displays` already show the file they would be set to, asked of the
+    /// wallpaper store rather than inferred. A read is ~1ms against ~850ms for a set, so
+    /// this is worth doing before re-asserting a Space whose coverage was thrown away
+    /// wholesale - on wake or a reconfiguration the image is usually still there.
+    ///
+    /// The answer is deliberately not durable. It comes from a single read, where a
+    /// `Coverage` entry comes from the poll-to-convergence below, and these are exactly
+    /// the moments macOS is re-seeding its own wallpaper state; a false positive kept in
+    /// the memo would pin a stale image for the whole TTL, where discarded it costs one
+    /// arrival and repairs itself on the next switch.
+    public static func alreadyShowing(
+        source: URL, layout: PhysicalLayout, displays: Set<String>
+    ) -> Set<String> {
+        let dir = StateStore.renderDirectory
+            .appendingPathComponent(renderKey(source: source, layout: layout), isDirectory: true)
+        let screensByID = Dictionary(
+            uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, NSScreen)? in
+                screen.displayID.map { ($0, screen) }
+            }
+        )
+        var shown: Set<String> = []
+        for entry in layout.entries where displays.contains(entry.placement.uuid) {
+            guard let screen = screensByID[entry.display.id] else { continue }
+            let target = screenFile(in: dir, uuid: entry.placement.uuid)
+            if NSWorkspace.shared.desktopImageURL(for: screen)?.path == target.path {
+                shown.insert(entry.placement.uuid)
+            }
+        }
+        return shown
+    }
+
     /// How many render sets to keep; uncapped, a cycling agent grows the cache forever.
     static let cacheLimit = 50
 

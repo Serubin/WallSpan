@@ -146,6 +146,12 @@ func parseInterval(_ s: String) -> TimeInterval? {
     return n
 }
 
+/// Zero is off here, where `parseInterval` rightly refuses it for a cycle length.
+func parseIdleDefer(_ s: String) -> TimeInterval? {
+    let t = s.trimmingCharacters(in: .whitespaces).lowercased()
+    return ["0", "off", "none"].contains(t) ? 0 : parseInterval(t)
+}
+
 func expand(_ path: String) -> URL {
     URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
 }
@@ -702,6 +708,7 @@ struct CycleOverrides {
     var recursive: Bool?
     var shuffle: Bool?
     var intervalSeconds: TimeInterval?
+    var idleDeferSeconds: TimeInterval?
 
     func applied(to cfg: CycleConfig) -> CycleConfig {
         var out = cfg
@@ -709,6 +716,7 @@ struct CycleOverrides {
         if let r = recursive { out.recursive = r }
         if let s = shuffle { out.shuffle = s }
         if let i = intervalSeconds { out.intervalSeconds = i }
+        if let q = idleDeferSeconds { out.idleDeferSeconds = q }
         return out
     }
 }
@@ -748,6 +756,12 @@ final class Cycler {
     /// Verbose gate logging. Skips are the common case by design and would bury the
     /// applies, which are the events worth seeing.
     var logSkips = false
+    /// A scheduled change waiting for the user to go quiet. Single-flight, like
+    /// `retryWork`: the repeating timer keeps firing while one of these is pending.
+    var idleWait: DispatchWorkItem?
+    /// When the pending wait started, so the cap is measured from the tick that was due
+    /// rather than from the latest re-check.
+    var idleWaitSince: Date?
 
     init(layout: PhysicalLayout, config: CycleConfig, overrides: CycleOverrides) {
         self.layout = layout
@@ -810,9 +824,16 @@ final class Cycler {
 
     func scheduleTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
+        // Where a scheduled tick originates - a resume, a retry and startup all have a user
+        // waiting on them and must not sit out an idle wait.
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.tick(scheduled: true)
+        }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        // A wait belongs to the tick that was due under the old schedule; restarting the
+        // clock retires it, or `next` would be chased by a change nobody asked for.
+        cancelIdleWait()
     }
 
     /// Re-ticks after a backoff; without it an unusable directory stalls the run.
@@ -882,7 +903,9 @@ final class Cycler {
     /// so it cannot stack with a manual `next`.
     var resumeTick: DispatchWorkItem?
 
-    func tick() {
+    /// `scheduled` marks the interval timer's own tick, the only one that may wait for the
+    /// user to stop typing. A resume, a retry and startup all have someone waiting on them.
+    func tick(scheduled: Bool = false) {
         // Guarded here rather than in advance(): draining the run loop lets the tick Timer
         // fire mid-apply, and ensurePlaylist() would then swap `playlist` out from under
         // the apply still running - persisting a fresh playlist's index for the image the
@@ -896,7 +919,9 @@ final class Cycler {
         guard !applying else {
             print("[\(timestamp())] tick deferred: previous apply still running")
             deferredTick?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.tick() }
+            // Carries `scheduled` through, or a tick that merely landed mid-apply would
+            // come back as an urgent one and skip the gate.
+            let work = DispatchWorkItem { [weak self] in self?.tick(scheduled: scheduled) }
             deferredTick = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
             return
@@ -904,9 +929,57 @@ final class Cycler {
         reloadConfigIfChanged()
         // After the reload, so a resume written to the config takes effect on this tick
         // rather than the one after it.
-        guard !config.paused else { return }
-        guard ensurePlaylist() != nil else { return }
+        guard !config.paused else { cancelIdleWait(); return }
+        guard ensurePlaylist() != nil else { cancelIdleWait(); return }
+        // Last, so a config edit still lands mid-wait. A queued resume skips the gate: it
+        // retires any wait armed here, logging a deferral that never happened.
+        if scheduled, resumeTick == nil, waitForQuiet() { return }
         advance()
+    }
+
+    /// True when this tick is now waiting on the user, re-arming itself until the user goes
+    /// quiet or the cap expires. `cancelIdleWait` is what retires it early.
+    func waitForQuiet() -> Bool {
+        // Dated before the first ask, not after it: passed as nil the cap would not bound
+        // that first sleep, which overshoots it whenever the cap is under a recheck.
+        let since = idleWaitSince ?? Date()
+        guard let delay = IdleGate.retryDelay(
+            idle: IdleGate.secondsSinceInput(),
+            threshold: config.idleDeferSeconds,
+            waitingSince: since,
+            // Half the interval, so a wait can never outlive the tick that started it and
+            // collide with the next one.
+            cap: min(interval / 2, 300)
+        ) else {
+            cancelIdleWait()
+            return false
+        }
+        if idleWaitSince == nil {
+            idleWaitSince = since
+            print("[\(timestamp())] change due, waiting for "
+                  + "\(Int(config.idleDeferSeconds))s of quiet")
+            var status = StatusStore.load()
+            status.deferredSince = since
+            StatusStore.save(status)
+        }
+        idleWait?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.tick(scheduled: true) }
+        idleWait = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        return true
+    }
+
+    /// Retires a pending wait. Every path that ends a wait without applying calls it — a
+    /// pause, an unusable directory, a new schedule — or `status.json` would go on claiming
+    /// a change is still pending on the user long after nothing is.
+    func cancelIdleWait() {
+        idleWait?.cancel()
+        idleWait = nil
+        guard idleWaitSince != nil else { return }
+        idleWaitSince = nil
+        var status = StatusStore.load()
+        status.deferredSince = nil
+        StatusStore.save(status)
     }
 
     /// What `wallspan next` triggers: change now, and stay paused if we were.
@@ -931,6 +1004,9 @@ final class Cycler {
         // Whatever route got here satisfies a pending resume-triggered tick.
         resumeTick?.cancel()
         resumeTick = nil
+        // And a pending idle wait: `next` or a resume arriving mid-wait is the change the
+        // wait was holding, and leaving it armed would consume a second playlist entry.
+        cancelIdleWait()
         // Held across the whole of advance(), not just the apply: the playlist entry is
         // consumed here, and consuming it must be inside the same guarded window that the
         // apply is, or a re-entrant tick could take a second entry.
@@ -1083,7 +1159,18 @@ final class Cycler {
                 return
             }
 
-            let displays = Set(stale.map(\.display))
+            // Ask the desktop before paying for a set. Not recorded; see `alreadyShowing`.
+            let needed = Set(stale.map(\.display))
+            let displays = needed.subtracting(WallpaperApplier.alreadyShowing(
+                source: img, layout: self.layout, displays: needed
+            ))
+            guard !displays.isEmpty else {
+                if self.logSkips {
+                    print("[\(timestamp())] space changed -> desktop already correct, skipped")
+                }
+                return
+            }
+
             print("[\(timestamp())] space changed -> \(img.lastPathComponent)"
                   + " on \(displays.count) of \(self.layout.entries.count) display(s)")
             self.applyAndRecord(img, layout: self.layout, displays: displays)
@@ -1166,6 +1253,10 @@ func cmdCycle() throws {
     if let s = args.value("interval") {
         guard let i = parseInterval(s) else { fail("bad --interval: \(s)") }
         overrides.intervalSeconds = i
+    }
+    if let s = args.value("idle-defer") {
+        guard let i = parseIdleDefer(s) else { fail("bad --idle-defer: \(s)") }
+        overrides.idleDeferSeconds = i
     }
 
     let config = overrides.applied(to: ConfigStore.load())
@@ -1257,6 +1348,10 @@ func applyConfigFlags(to cfg: inout CycleConfig) -> Bool {
         guard let i = parseInterval(s) else { fail("bad --interval: \(s)") }
         cfg.intervalSeconds = i; touched = true
     }
+    if let s = args.value("idle-defer") {
+        guard let i = parseIdleDefer(s) else { fail("bad --idle-defer: \(s)") }
+        cfg.idleDeferSeconds = i; touched = true
+    }
     if args.has("sequential") { cfg.shuffle = false; touched = true }
     if args.has("shuffle") { cfg.shuffle = true; touched = true }
     if args.has("recursive") { cfg.recursive = true; touched = true }
@@ -1312,6 +1407,11 @@ func cmdStatus() throws {
     }
     if let at = report.appliedAt { print("applied   : \(relative(at))") }
     if let next = report.nextAt { print("next      : \(relative(next))") }
+    // Without this the line above reads as overdue for the whole wait, which is the
+    // confusion `deferredSince` exists to prevent.
+    if let held = report.deferredSince {
+        print("          : due \(relative(held)), waiting for you to stop typing")
+    }
     if let err = report.lastError { print("last error: \(err)") }
     if !report.running {
         print("\nnothing is cycling. `wallspan agent install` runs it in the background,")
@@ -1369,7 +1469,7 @@ func cmdConfig() throws {
     case "set":
         var cfg = ConfigStore.load()
         guard applyConfigFlags(to: &cfg) else {
-            fail("nothing to set. options: --dir <path> --interval 15m --shuffle|--sequential --recursive|--no-recursive")
+            fail("nothing to set. options: --dir <path> --interval 15m --idle-defer 5s --shuffle|--sequential --recursive|--no-recursive")
         }
         try ConfigStore.save(cfg)
         if jsonMode { emit(configReport(cfg), as: "config") }
@@ -1470,12 +1570,13 @@ func usage() {
           Render per-display crops and set them as wallpaper. --dry-run writes the
           PNGs and prints their paths without changing anything.
 
-      wallspan cycle [directory] [--interval 15m] [--shuffle|--sequential]
-                     [--recursive|--no-recursive] [--verbose]
+      wallspan cycle [directory] [--interval 15m] [--idle-defer 5s|off]
+                     [--shuffle|--sequential] [--recursive|--no-recursive] [--verbose]
           Walk a folder on an interval. Re-renders automatically if you rearrange
           or unplug a display. Runs in the foreground. With no arguments it reads
           the config, and re-reads it every tick. --verbose also logs the Space
-          switches that needed no work.
+          switches that needed no work. --idle-defer holds a scheduled change until
+          you stop typing; arriving at a Space and `next` never wait.
 
     DRIVING A RUNNING CYCLER
       wallspan status

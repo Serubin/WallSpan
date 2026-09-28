@@ -14,19 +14,24 @@ public struct CycleConfig: Codable, Equatable {
     /// signal's effect would not survive that — the wallpaper would silently start moving
     /// again after a crash or a logout. Defaulted for configs written before it existed.
     public var paused: Bool
+    /// Seconds of input quiet a scheduled change waits for. 0 applies regardless.
+    /// Only the interval tick honours it; see `IdleGate`.
+    public var idleDeferSeconds: Double
 
     public init(
         playlistDirectory: String? = nil,
         intervalSeconds: Double = 900,
         shuffle: Bool = true,
         recursive: Bool = false,
-        paused: Bool = false
+        paused: Bool = false,
+        idleDeferSeconds: Double = 5
     ) {
         self.playlistDirectory = playlistDirectory
         self.intervalSeconds = intervalSeconds
         self.shuffle = shuffle
         self.recursive = recursive
         self.paused = paused
+        self.idleDeferSeconds = idleDeferSeconds
     }
 
     /// Explicit so a `config.json` predating `paused` still decodes instead of falling back
@@ -38,6 +43,7 @@ public struct CycleConfig: Codable, Equatable {
         shuffle = try c.decodeIfPresent(Bool.self, forKey: .shuffle) ?? true
         recursive = try c.decodeIfPresent(Bool.self, forKey: .recursive) ?? false
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        idleDeferSeconds = try c.decodeIfPresent(Double.self, forKey: .idleDeferSeconds) ?? 5
     }
 
     public var directoryURL: URL? {
@@ -61,6 +67,8 @@ public enum ConfigStore {
         out += "  interval  : \(formatInterval(cfg.intervalSeconds))\n"
         out += "  order     : \(cfg.shuffle ? "shuffled" : "sequential")\n"
         out += "  recursive : \(cfg.recursive)\n"
+        out += "  idle defer: " + (cfg.idleDeferSeconds > 0
+            ? "\(Int(cfg.idleDeferSeconds))s of quiet before a scheduled change\n" : "off\n")
         if cfg.paused { out += "  paused    : yes  (`wallspan resume` starts it again)\n" }
         if let dir = cfg.directoryURL {
             let n = (try? Playlist.scan(dir, recursive: cfg.recursive).count) ?? 0

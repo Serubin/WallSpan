@@ -20,6 +20,10 @@ public struct CycleStatus: Codable {
     /// `config.json`: `cycle --interval 10m` overrides the file for the life of that run.
     /// Without this, a countdown computed from the config is simply wrong for the whole run.
     public var intervalSeconds: Double?
+    /// When a due change started waiting for the user to go quiet, nil when nothing is
+    /// waiting. Without it a countdown computed from `appliedAt` runs past zero during a
+    /// deferral and the cycler reads as stuck rather than polite.
+    public var deferredSince: Date?
     public var updatedAt: Date
 
     public init(
@@ -28,6 +32,7 @@ public struct CycleStatus: Codable {
         position: String? = nil,
         lastError: String? = nil,
         intervalSeconds: Double? = nil,
+        deferredSince: Date? = nil,
         updatedAt: Date = Date()
     ) {
         self.currentImage = currentImage
@@ -35,6 +40,7 @@ public struct CycleStatus: Codable {
         self.position = position
         self.lastError = lastError
         self.intervalSeconds = intervalSeconds
+        self.deferredSince = deferredSince
         self.updatedAt = updatedAt
     }
 }
