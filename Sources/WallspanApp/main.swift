@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--about") {
             controller.showAbout()
         }
+        if CommandLine.arguments.contains("--check-updates") {
+            controller.checkForUpdates()
+        }
     }
 }
 
