@@ -29,6 +29,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// pausing and resuming cycling.
     private let calibration = CalibrationWindowController()
     private let about = AboutWindowController()
+    private let updates = UpdateChecker()
+    /// `resolveBinary` runs again for "Look Again", which must not re-arm the check.
+    private var didArmUpdateChecks = false
+    private var updateTimer: Timer?
+    private var updateCheckInFlight = false
     private var refreshTimer: Timer?
     /// Faster polling only while the menu is open — the countdown is visible then, and
     /// invisible the rest of the time.
@@ -42,6 +47,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     override init() {
         super.init()
         menu.delegate = self
+        // Otherwise AppKit re-enables every item whose target answers its action, after
+        // `rebuild()` has run, and each `isEnabled = false` below is silently undone.
+        menu.autoenablesItems = false
         statusItem.menu = menu
         updateButton()
 
@@ -74,6 +82,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 self?.updateButton()
                 self?.updateAbout()
                 self?.refresh()
+                self?.armUpdateChecks()
             }
         }
     }
@@ -197,6 +206,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(disabled("wallspan not found"))
             menu.addItem(.separator())
             menu.addItem(item("Look Again", #selector(lookAgain)))
+            // Offered here too: a broken install is exactly when an update is worth knowing
+            // about, and this branch is where a broken install lands.
+            addUpdateItems()
             menu.addItem(item("About Wallspan…", #selector(openAbout)))
             menu.addItem(.separator())
             menu.addItem(item("Quit Wallspan", #selector(quit), key: "q"))
@@ -265,7 +277,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addDisplaysItem()
         addCommandLineToolItem()
 
-        menu.addItem(.separator())
+        addUpdateItems()
         menu.addItem(item("About Wallspan…", #selector(openAbout)))
         menu.addItem(item("Quit Wallspan", #selector(quit), key: "q"))
     }
@@ -589,6 +601,167 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: - updates
+
+    /// Once per launch, five seconds after the binary resolves — at login the network is
+    /// frequently not up yet — plus a re-arm for a Mac that is never restarted.
+    private func armUpdateChecks() {
+        guard !didArmUpdateChecks else { return }
+        didArmUpdateChecks = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.checkForUpdatesQuietly()
+        }
+        let timer = Timer(timeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.checkForUpdatesQuietly()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        updateTimer = timer
+    }
+
+    /// The automatic path never alerts, whatever the answer: offline, rate limited and
+    /// already up to date are all things nobody asked to hear about.
+    private func checkForUpdatesQuietly() {
+        guard updates.automatic else { return }
+        updates.check(force: false, against: .current(resolution: resolution)) {
+            [weak self] outcome in
+            if case .available(let offer) = outcome {
+                UpdateChecker.log("wallspan \(offer.latest) is available")
+            }
+            if self?.menuIsOpen == true { self?.rebuild() }
+        }
+    }
+
+    /// Computed from the last tag seen and the *current* resolution, never stored — which
+    /// is what lets "Look Again" recompute the entry with no second request.
+    private func currentOffer() -> UpdateOffer? {
+        guard let tag = updates.lastSeenTag else { return nil }
+        return UpdateOffer.make(tag: tag, builds: .current(resolution: resolution))
+    }
+
+    private func addUpdateItems() {
+        menu.addItem(.separator())
+
+        if let offer = currentOffer() {
+            let entry = item("Update Available — \(offer.latest)", #selector(openUpdate))
+            entry.toolTip = offer.commands.isEmpty
+                ? "Opens the release page. Right now \(offer.behind)."
+                : "Homebrew installed this, so upgrade it there: "
+                    + offer.commands.joined(separator: ", ")
+            menu.addItem(entry)
+        }
+
+        let check = item(updateCheckInFlight ? "Checking for Updates…" : "Check for Updates…",
+                         #selector(checkForUpdatesNow))
+        check.isEnabled = !updateCheckInFlight
+        menu.addItem(check)
+
+        let automatic = item("Check for Updates Automatically",
+                             #selector(toggleAutomaticUpdates))
+        automatic.state = updates.automatic ? .on : .off
+        automatic.toolTip = "One unauthenticated request to GitHub's releases endpoint, at "
+            + "most once a day. Nothing is sent about you or this machine."
+        menu.addItem(automatic)
+
+        menu.addItem(.separator())
+    }
+
+    /// The entry point for `--check-updates`, which exists for the same reason `--about`
+    /// does. Waits for the probe, since the comparison has no basis until it lands.
+    func checkForUpdates(retriesLeft: Int = 20) {
+        guard didResolve else {
+            guard retriesLeft > 0 else {
+                return UpdateChecker.log("gave up waiting for the binary probe to finish")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.checkForUpdates(retriesLeft: retriesLeft - 1)
+            }
+            return
+        }
+        checkForUpdatesNow()
+    }
+
+    @objc private func checkForUpdatesNow() {
+        updateCheckInFlight = true
+        if menuIsOpen { rebuild() }
+        updates.check(force: true, against: .current(resolution: resolution)) {
+            [weak self] outcome in
+            guard let self else { return }
+            updateCheckInFlight = false
+            if menuIsOpen { rebuild() }
+            announce(outcome)
+        }
+    }
+
+    @objc private func toggleAutomaticUpdates() {
+        updates.automatic.toggle()
+        rebuild()
+        // An explicit yes deserves an answer now — but through the gated path, so it does
+        // not make a second request if a check already succeeded today.
+        if updates.automatic { checkForUpdatesQuietly() }
+    }
+
+    @objc private func openUpdate() {
+        guard let offer = currentOffer() else { return }
+        offerUpdate(offer)
+    }
+
+    /// A manual check always ends in something visible. "Fail silent" governs the automatic
+    /// path only; here `perform(_:describing:)`'s reasoning applies instead.
+    private func announce(_ outcome: UpdateChecker.Outcome) {
+        switch outcome {
+        case .available(let offer):
+            offerUpdate(offer)
+        case .upToDate(let latest):
+            inform("You're up to date.", "\(latest) is the latest release.")
+        case .ahead(let latest):
+            inform("You're ahead of the latest release.",
+                   "This build is newer than \(latest).")
+        case .failed(let why):
+            report(why, while: "check for updates")
+        case .skipped:
+            inform("Nothing to compare.", "This looks like a development build, so there "
+                   + "is no released version to measure it against.")
+        }
+    }
+
+    /// A Homebrew install is given the command rather than a zip that `brew upgrade` would
+    /// overwrite on its next run. Anything else opens the page, which is the whole answer.
+    private func offerUpdate(_ offer: UpdateOffer) {
+        guard !offer.commands.isEmpty else {
+            NSWorkspace.shared.open(offer.releaseURL)
+            return
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Wallspan \(offer.latest) is available"
+        alert.informativeText = "Right now \(offer.behind). Homebrew installed it, so "
+            + "upgrade it there:\n\n" + offer.commands.joined(separator: "\n")
+        alert.addButton(withTitle: offer.commands.count > 1 ? "Copy Commands" : "Copy Command")
+        alert.addButton(withTitle: "Release Notes…")
+        alert.addButton(withTitle: "Later")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(offer.commands.joined(separator: "\n"),
+                                           forType: .string)
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.open(offer.releaseURL)
+        default:
+            break
+        }
+    }
+
+    private func inform(_ message: String, _ detail: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.runModal()
+    }
 
     // MARK: - formatting
 
