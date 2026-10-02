@@ -9,7 +9,10 @@
 
 A replacement for aging paid alternatives for applying multi monitor spanning wallpapers.
 
-macOS only. No dependencies, no network access, no telemetry, no subscription.
+macOS only. No dependencies, no telemetry, no subscription. The CLI never touches the
+network; the menu bar app does so only to [check for
+updates](#checking-for-updates) — automatically if you turn that on, which is off by
+default, or when you ask it to.
 
 ## What it does
 
@@ -255,6 +258,39 @@ release's notes carry the exact commands.
 Releases are cut by running the `release` workflow against a ref. It builds and verifies
 first, then leaves a draft for review; the git tag is created only when that draft is
 published.
+
+### Checking for updates
+
+Nothing here phones home unless you ask it to. **Check for Updates Automatically** in the
+menu bar app is off until you turn it on, and **Check for Updates…** next to it works
+whether or not you have.
+
+When it does run, this is the whole of it: one unauthenticated `GET` of
+
+```
+https://api.github.com/repos/Serubin/WallSpan/releases/latest
+```
+
+and nothing else. The only field read from the answer is `tag_name`. The request carries no
+identifier, no version, no install count and no beacon — just `Accept`, a bare
+`User-Agent: Wallspan` and `Accept-Language: en`. Those last two are pinned deliberately:
+left alone, the defaults would report the app version, your exact macOS build, and the
+language list you have configured. No `If-None-Match`, so there is no per-install token to
+echo back either, and no cookies are stored or sent.
+
+Automatic checks happen at most once a day, and the time of the last successful one is
+remembered so relaunching in a loop does not repeat it. Nothing is downloaded and nothing
+updates itself: the result is a menu entry — the release page, or the `brew upgrade`
+command when Homebrew owns the copy that is behind. The tag last seen is remembered, so
+that entry survives a relaunch without asking GitHub again.
+
+The app compares the release against both halves — the `wallspan` it resolved and its own
+bundle — and reports whichever is behind. It never offers a downgrade, and a `snapshot` or
+`dev` build is never nudged toward an older `release`. If Homebrew installed the stale half
+you are given `brew upgrade` rather than a zip Homebrew would overwrite on its next run.
+
+A failed automatic check says nothing at all — offline, rate limited and captive-portalled
+are not worth an alert. A failed *manual* check tells you why, because you asked.
 
 ## Known limits
 
