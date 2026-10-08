@@ -155,7 +155,7 @@ enum Contract {
         }
     }
 
-    struct Display: Decodable, Identifiable {
+    struct Display: Decodable, Identifiable, Equatable {
         var uuid: String
         var name: String
         var pixelWidth: Int
@@ -222,12 +222,15 @@ enum Contract {
         var displays: [Display]
         var gaps: [Gap]
         var calibrated: Bool
+        /// The panel the calibration lattice is pinned to. Absent from an older CLI.
+        var anchorUUID: String?
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: AnyKey.self)
             displays = c.or("displays", [])
             gaps = c.or("gaps", [])
             calibrated = c.or("calibrated", false)
+            anchorUUID = c.opt("anchorUUID")
         }
     }
 

@@ -6,7 +6,8 @@ import AppKit
 /// Menu bar front-end for the `wallspan` CLI.
 ///
 /// It spawns the CLI and renders its `--json` output; it holds no wallpaper, layout or
-/// playlist logic of its own, and links none. See `docs/cli-json-contract.md`.
+/// playlist logic of its own, and links none — only the calibration lattice's drawing. See
+/// `docs/cli-json-contract.md`.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: StatusItemController?
 
@@ -27,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--check-updates") {
             controller.checkForUpdates()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controller?.prepareForTermination()
     }
 }
 

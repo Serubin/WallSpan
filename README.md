@@ -91,15 +91,16 @@ formula, say — since a second link would only be a way to run the wrong one.
 ### Calibrating from the app
 
 **Displays ▸ Calibrate…** opens a window that does the bezel measurement described below
-without the terminal. It puts the test pattern on your screens, and the arrow keys move
-the selected panel — the judgement still happens by eye, across the bezel, so the window
-stays small and out of the way. Gap readouts update as you go; the pattern follows a moment
-later, once you stop pressing.
+without the terminal. It lays the test pattern over every screen, on every Space, in front
+of the desktop — your wallpaper is never touched — and the judgement still happens by eye,
+across the bezel, so the window stays small and out of the way. The pattern moves the
+moment you do; gap readouts follow a beat later.
 
-Two controls, because there are two ways to be wrong. **Arrow keys** move a panel, in
-pixels — diagonals breaking across the bezel mean the position is off. **Panel scale**
-changes its density, in PPI — circles breaking while the diagonals line up mean the scale
-is off, and no amount of nudging fixes that.
+Two controls, because there are two ways to be wrong. **Arrow keys**, or **dragging** a
+screen, move the picture on it — diagonals breaking across the bezel mean the position is
+off. Clicking a screen selects it; the reference screen is held still, so drag the others.
+**Panel scale** (or **⌥↑ / ⌥↓**) changes a panel's density, in PPI — circles breaking while
+the diagonals line up mean the scale is off, and no amount of nudging fixes that.
 
 It pauses cycling while it is open and resumes when you close it — unless you had already
 paused it yourself, in which case it leaves it alone.

@@ -45,15 +45,21 @@ struct CalibrationView: View {
         .focusable()
         .focused($keyboardFocused)
         .onAppear { keyboardFocused = true }
-        .onKeyPress(.leftArrow) { nudge(dx: -model.stepPx) }
-        .onKeyPress(.rightArrow) { nudge(dx: model.stepPx) }
-        .onKeyPress(.upArrow) { nudge(dy: model.stepPx) }
-        .onKeyPress(.downArrow) { nudge(dy: -model.stepPx) }
+        .onKeyPress(.leftArrow, phases: [.down, .repeat]) { arrow($0, dx: -1) }
+        .onKeyPress(.rightArrow, phases: [.down, .repeat]) { arrow($0, dx: 1) }
+        .onKeyPress(.upArrow, phases: [.down, .repeat]) { arrow($0, dy: 1) }
+        .onKeyPress(.downArrow, phases: [.down, .repeat]) { arrow($0, dy: -1) }
     }
 
-    private func nudge(dx: Double = 0, dy: Double = 0) -> KeyPress.Result {
+    /// ⌥↑/⌥↓ scale, plain arrows nudge. Arrow keys also carry `.numericPad` and `.function`.
+    private func arrow(_ press: KeyPress, dx: Double = 0, dy: Double = 0) -> KeyPress.Result {
+        if press.modifiers.contains(.option) {
+            guard dy != 0 else { return .ignored }
+            model.scaleBy(percent: dy > 0 ? 0.1 : -0.1)
+            return .handled
+        }
         guard model.canCalibrate else { return .ignored }
-        model.nudge(dx: dx, dy: dy)
+        model.nudge(dx: dx * model.stepPx, dy: dy * model.stepPx)
         return .handled
     }
 
@@ -78,11 +84,13 @@ struct CalibrationView: View {
             HStack(spacing: 12) {
                 arrowPad
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Arrow keys move the picture on the selected display.")
+                    Text("Arrow keys, or dragging a screen, move the picture on it. "
+                         + "Click a screen to select it.")
                         .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text("Diagonals breaking across the bezel mean the position is off. "
                          + "Circles breaking while the diagonals line up mean the scale is — "
-                         + "use Panel scale below, no nudge can fix it.")
+                         + "use Panel scale below or ⌥↑ / ⌥↓, no nudge can fix it.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -129,10 +137,10 @@ struct CalibrationView: View {
                     HStack(spacing: 8) {
                         Text("Panel scale").frame(width: 78, alignment: .leading)
                         Button("−") { model.scaleBy(percent: -0.1) }
-                            .help("0.1% smaller")
+                            .help("0.1% smaller (⌥↓)")
                         PPIField(value: display.ppi) { model.setPPI($0) }
                         Button("+") { model.scaleBy(percent: 0.1) }
-                            .help("0.1% larger")
+                            .help("0.1% larger (⌥↑)")
                         Text("PPI").font(.caption).foregroundStyle(.secondary)
                         Text(String(format: "%.1f × %.1f mm", display.widthMM, display.heightMM))
                             .font(.caption.monospacedDigit())
@@ -196,9 +204,9 @@ struct CalibrationView: View {
                 .disabled(model.busy)
                 .help("Back to edge-to-edge, seeded from what each display reports.")
 
-            if model.patternStale || model.busy {
+            if model.busy {
                 ProgressView().controlSize(.small)
-                Text(model.patternStale ? "Updating screens…" : "Working…")
+                Text("Working…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -289,8 +297,7 @@ struct CalibrationView: View {
     }
 }
 
-/// Commits on Return or focus loss, never per keystroke — each commit is a CLI call and a
-/// re-render of the desktop.
+/// Commits on Return or focus loss, never per keystroke — each commit is a CLI call.
 private struct PPIField: View {
     let value: Double
     let commit: (Double) -> Void

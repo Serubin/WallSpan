@@ -344,6 +344,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         calibration.show(runner: runner)
     }
 
+    func prepareForTermination() {
+        calibration.prepareForTermination()
+    }
+
     /// Offered only when there is nothing to reach `wallspan` by. A CLI already resolved
     /// from PATH or a standard location — Homebrew's formula, say — is the thing this item
     /// would install, and linking a second copy over it would only be a way to end up
