@@ -5,8 +5,15 @@ import AppKit
 import CalibrationLattice
 import Combine
 
-/// Draws the calibration lattice over every screen, above the desktop and below every
-/// normal window, without touching the wallpaper.
+/// Window levels during calibration: the pattern over every app window and the Dock, below
+/// the menu bar, and the controls above the pattern.
+enum CalibrationLevel {
+    static let overlay = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 1)
+    static let controls = NSWindow.Level(rawValue: overlay.rawValue + 1)
+}
+
+/// Draws the calibration lattice over every screen, in front of every window, without
+/// touching the wallpaper.
 final class CalibrationOverlay {
     private let model: CalibrationModel
     private let onGrab: () -> Void
@@ -97,8 +104,9 @@ private final class OverlayWindow: NSWindow {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
-        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
-        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        level = CalibrationLevel.overlay
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary,
+                              .ignoresCycle]
         overlayView.menuBarInset = screen.frame.maxY - screen.visibleFrame.maxY
         contentView = overlayView
     }

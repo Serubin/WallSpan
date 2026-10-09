@@ -92,9 +92,9 @@ formula, say — since a second link would only be a way to run the wrong one.
 
 **Displays ▸ Calibrate…** opens a window that does the bezel measurement described below
 without the terminal. It lays the test pattern over every screen, on every Space, in front
-of the desktop — your wallpaper is never touched — and the judgement still happens by eye,
-across the bezel, so the window stays small and out of the way. The pattern moves the
-moment you do; gap readouts follow a beat later.
+of every window but the menu bar — your wallpaper is never touched — with the controls above
+it. The judgement still happens by eye, across the bezel, so the controls stay small and out
+of the way. The pattern moves the moment you do; gap readouts follow a beat later.
 
 Two controls, because there are two ways to be wrong. **Arrow keys**, or **dragging** a
 screen, move the picture on it — diagonals breaking across the bezel mean the position is
