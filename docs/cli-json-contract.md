@@ -59,7 +59,7 @@ Dates are ISO-8601 strings, not Foundation reference-date numbers.
 |---|---|---|
 | `version --json` | `version` | `{version, channel, commit, schema, commands[]}`. Also the probe. |
 | `info --json` | `layout` | Same payload as `layout show --json`. |
-| `layout show --json` | `layout` | Displays, union, gaps, coverage, fingerprint. |
+| `layout show --json` | `layout` | Displays, union, gaps, coverage, fingerprint, anchor. |
 | `layout list --json` | `sets` | Calibrated display combinations. `[]` when none — not an error. |
 | `layout nudge\|set\|size\|reset --json` | `layout` | The state the edit produced. |
 | `calibrate --json` | `layout` | Applies the test pattern, returns the layout it was drawn for. |
@@ -115,6 +115,9 @@ Next that silently does nothing.
 - `config.configPath` — where the settings live, for a "reveal in Finder" affordance.
 - `layout.calibrated` — false while every gap is still zero, i.e. seeded from EDID but
   never measured.
+- `layout.anchorUUID` — the panel the calibration lattice is pinned to, whose picture holds
+  still whichever panel is nudged. A front-end drawing the lattice itself derives the anchor
+  point from this panel's current placement, so a nudge to it moves the lattice with it.
 - `layout.displays[].reportedSizeMM` — what the panel itself claims, beside `sizeMM`,
   which holds the corrected figure. They differ when a panel reported non-square
   pixels; showing both is what makes the correction overrulable.

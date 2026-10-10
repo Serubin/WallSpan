@@ -10,11 +10,15 @@ let package = Package(
     name: "wallspan",
     platforms: [.macOS(.v14)],
     targets: [
-        .target(name: "WallspanCore"),
+        // Pure drawing, no wire types: the CLI's calibrate wallpaper and the app's overlay.
+        .target(name: "CalibrationLattice"),
+        .target(name: "WallspanCore", dependencies: ["CalibrationLattice"]),
         .executableTarget(name: "wallspan", dependencies: ["WallspanCore"]),
-        // Depends on nothing on purpose: the app spawns the CLI and parses --json, so the
-        // two release separately. Named WallspanApp because `Wallspan` would collide with
-        // `wallspan` in .build on a case-insensitive volume.
-        .executableTarget(name: "WallspanApp"),
+        // No contract types shared: the app parses the CLI's --json, and the two release apart.
+        .executableTarget(
+            // `Wallspan` would collide with `wallspan` in .build on a case-insensitive volume.
+            name: "WallspanApp",
+            dependencies: ["CalibrationLattice"]
+        ),
     ]
 )

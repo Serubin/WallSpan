@@ -4,11 +4,12 @@
 import AppKit
 import SwiftUI
 
-/// Hosts the calibration view. One instance only — two would both pause and resume
-/// cycling, and the second to close would resume what the first still owned.
+/// Hosts the calibration view and the overlay it drives. One instance only — two would both
+/// pause and resume cycling, and the second to close would resume what the first still owned.
 final class CalibrationWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var model: CalibrationModel?
+    private var overlay: CalibrationOverlay?
 
     func show(runner: CLIRunner) {
         if let window {
@@ -29,24 +30,39 @@ final class CalibrationWindowController: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
-        // Above the desktop but not above everything: the user is looking past this window
+        // Above the overlay but not above everything: the user is looking past this window
         // at the pattern, and may want another app in front of it.
         window.level = .normal
         self.window = window
+
+        // Clicking a screen activates the app; the arrow keys need this window to be key.
+        overlay = CalibrationOverlay(model: model) { [weak self] in self?.focusControls() }
 
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         model.open()
     }
 
+    private func focusControls() {
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
     func close() {
         window?.close()
     }
 
+    /// Quitting never closes the window, so the queued edits and the resume would be lost.
+    func prepareForTermination() {
+        model?.close(waiting: true)
+    }
+
     /// Covers the close button, Done, and the window being closed any other way — all of
-    /// them have to return cycling to how it was found.
+    /// them have to save what the screens show and return cycling to how it was found.
     func windowWillClose(_ notification: Notification) {
         model?.close()
+        overlay?.tearDown()
+        overlay = nil
         model = nil
         window?.delegate = nil
         window = nil

@@ -133,6 +133,9 @@ extension Contract {
         /// False while every gap is still zero — seeded from EDID but never measured.
         public var calibrated: Bool
         public var fingerprint: String
+        /// The panel the calibration lattice is pinned to: its picture holds still, whichever
+        /// panel is nudged.
+        public var anchorUUID: String
 
         public init(_ layout: PhysicalLayout) {
             displays = layout.entries.map { DisplayReport(display: $0.display, placement: $0.placement) }
@@ -146,6 +149,7 @@ extension Contract {
             coverage = layout.coverage
             calibrated = layout.maxGapMM >= 0.05
             fingerprint = layout.fingerprint
+            anchorUUID = layout.anchorDisplay.placement.uuid
         }
     }
 
