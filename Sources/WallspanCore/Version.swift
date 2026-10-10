@@ -12,7 +12,7 @@ public enum Wallspan {
     /// The release this tree is working toward, bumped by hand right after a release and
     /// left alone through its betas. The release workflow refuses to tag a version that
     /// disagrees with it, which is what stops the bump being forgotten.
-    public static let baseVersion = "0.1.0"
+    public static let baseVersion = "1.0.0"
 
     /// The full version: `-beta.N`, `-rc.N` or `-unsigned.N` for a prerelease, and the
     /// channel and commit for a snapshot or dev build. Falls back to `baseVersion` in an
