@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch, tag or SHA to release
+        description: Branch, tag or full SHA to release
         required: true
         default: main
       version:
@@ -22,20 +22,28 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ inputs.version }}
   cancel-in-progress: false
 
+# Only `sign` holds the Developer ID; it runs this workflow's own commit and never compiles.
 jobs:
-  release:
-    runs-on: macos-latest
+  resolve:
+    # contents:write because drafts are invisible to a token without push access. That is
+    # safe only because nothing from the ref runs here: it is read as git blobs.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Validate
@@ -43,46 +51,64 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          REF: ${{ inputs.ref }}
           VERSION: ${{ inputs.version }}
+          ALLOW_UNMERGED: ${{ inputs.allow_unmerged }}
         run: |
           set -euo pipefail
 
-          # Resolved once, and every later step uses the SHA rather than the ref. A branch
-          # name would let the release drift to whatever landed while the build was running.
-          SHA="$(git rev-parse HEAD)"
+          case "$VERSION" in
+            v*) echo "::error::drop the leading v: pass the version without it"; exit 1 ;;
+          esac
+          # [[ =~ ]], not grep: grep matches line by line, so a second line would ride along.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::the version input is not a semver version"
+            exit 1
+          fi
           TAG="v$VERSION"
 
-          case "$VERSION" in
-            v*) echo "::error::drop the leading v: pass $VERSION without it"; exit 1 ;;
-          esac
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::$VERSION is not a semver version"
+          # A leading `-` would reach git as an option.
+          if ! [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/@+-]*$ ]]; then
+            echo "::error::the ref input is not a branch, tag or SHA"
+            exit 1
+          fi
+          if [[ "$REF" =~ ^[0-9a-f]{7,39}$ ]]; then
+            echo "::error::pass the full 40-character SHA; git cannot fetch an abbreviation"
             exit 1
           fi
 
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+          # Resolved once, and every later job uses the SHA rather than the ref. A branch
+          # name would let the release drift to whatever landed while the build was running.
+          git fetch --no-tags origin "$REF"
+          SHA="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
             echo "::error::tag $TAG already exists"
             exit 1
           fi
           # Drafts included: a draft holds the tag name reserved, and a second one would
           # quietly race the first to create the tag.
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          RELEASES="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')"
+          if grep -Fxq -- "$TAG" <<<"$RELEASES"; then
             echo "::error::a release for $TAG already exists (it may be a draft)"
             exit 1
           fi
 
           # The tree has to already claim the version it is being tagged as. This is what
           # keeps the post-release bump of baseVersion from being forgotten.
-          BASE="$(sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p' Sources/WallspanCore/Version.swift)"
+          BASE="$(git show "$SHA:Sources/WallspanCore/Version.swift" \
+            | sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p')"
+          if ! [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version.swift at $SHA has no single X.Y.Z baseVersion"
+            exit 1
+          fi
           CORE="${VERSION%%-*}"
           if [ "$BASE" != "$CORE" ]; then
             echo "::error::Version.swift says baseVersion $BASE, but this would tag $CORE"
             exit 1
           fi
 
-          if [ '${{ inputs.allow_unmerged }}' != true ]; then
-            # Explicit refspec: checkout was given a ref, not a branch, so there is no
-            # guarantee refs/remotes/origin/main exists to compare against.
+          if [ "$ALLOW_UNMERGED" != true ]; then
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             if ! git merge-base --is-ancestor "$SHA" origin/main; then
               echo "::error::$SHA is not an ancestor of main; re-run with allow_unmerged to override"
@@ -90,52 +116,345 @@ jobs:
             fi
           fi
 
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$SHA"
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          # Shown to whoever approves the release environment, before anything is signed.
+          echo "### Releasing \`$TAG\` from \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
           echo "releasing $TAG from $SHA"
+
+  build:
+    needs: resolve
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/build
         id: build
         with:
           channel: release
-          version: ${{ inputs.version }}
-          sha: ${{ steps.check.outputs.sha }}
+          version: ${{ needs.resolve.outputs.version }}
+          sha: ${{ needs.resolve.outputs.sha }}
 
-      - name: Compose the release notes
-        id: notes
+      - name: Bundle the app for signing
         run: |
           set -euo pipefail
-          NAME="wallspan-${{ steps.build.outputs.slug }}-universal"
+          # tar, because upload-artifact drops the executable bits the bundle depends on.
+          tar -czf "$RUNNER_TEMP/unsigned.tar.gz" dist/Wallspan.app README.md LICENSE brand
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/unsigned.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    needs: [resolve, build]
+    runs-on: macos-latest
+    timeout-minutes: 120
+    # Approval and a main-only branch rule guard this environment's secrets. They reach argv
+    # and disk below, which assumes an ephemeral GitHub-hosted runner.
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      signing: ${{ steps.verify.outputs.signing }}
+    steps:
+      # This workflow's commit, not the ref's: everything run while the identity is loaded
+      # has to be trusted code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require signing secrets
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          SET="gh secret set --env release --repo Serubin/WallSpan"
+          missing=0
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD \
+                      NOTARY_API_KEY_P8 NOTARY_API_KEY_ID NOTARY_API_ISSUER_ID; do
+            [ -z "${!name}" ] || continue
+            case "$name" in
+              DEVELOPER_ID_P12_BASE64) how="base64 -i DeveloperID.p12 | $SET $name" ;;
+              NOTARY_API_KEY_P8) how="$SET $name < AuthKey_<KEYID>.p8" ;;
+              *) how="$SET $name" ;;
+            esac
+            echo "::error::$name is unset in the release environment. Run: $how"
+            missing=1
+          done
+          if ! [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::APPLE_TEAM_ID is unset or not a team ID. Run: gh variable set APPLE_TEAM_ID --repo Serubin/WallSpan --body <TEAMID>"
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Unpack the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/sign"
+          mkdir -p "$W/download" "$W/build"
+          gh run download "$GITHUB_RUN_ID" --name unsigned --dir "$W/download"
+          tar -xzf "$W/download/unsigned.tar.gz" -C "$W/build"
+          APP="$W/build/dist/Wallspan.app"
+
+          # Regular files and directories only: a symlink or FIFO from the built ref would
+          # steer codesign, or package.sh's cp, at something on this runner.
+          ODD="$(find "$W/build" ! -type f ! -type d)"
+          if [ -n "$ODD" ]; then
+            echo "::error::the build contains something other than files and directories"
+            printf '%s\n' "$ODD"
+            exit 1
+          fi
+          # Exactly what make-app.sh lays out: anything else would ride along under the
+          # Developer ID.
+          GOT="$(cd "$APP" && find . ! -type d | LC_ALL=C sort)"
+          WANT="$(printf '%s\n' ./Contents/Helpers/wallspan ./Contents/Info.plist \
+            ./Contents/MacOS/Wallspan ./Contents/Resources/AppIcon.icns \
+            ./Contents/_CodeSignature/CodeResources)"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::Wallspan.app does not have the expected layout"
+            diff <(printf '%s\n' "$WANT") <(printf '%s\n' "$GOT") || true
+            exit 1
+          fi
+          # Read from the plist rather than by running the binary, which is untrusted here.
+          SHORT="$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")"
+          if [ "$SHORT" != "$VERSION" ]; then
+            echo "::error::the built app says $SHORT, not $VERSION"
+            exit 1
+          fi
+          { echo "W=$W"; echo "APP=$APP"; } >> "$GITHUB_ENV"
+
+      - name: Import the signing identity
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          DEVELOPER_ID_G2_SHA256: f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$W/signing.keychain-db"
+          security list-keychains -d user \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$W/keychains.before"
+
+          KC_PASSWORD="$(openssl rand -hex 32)"
+          security create-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN"
+          ( umask 077; printf '%s' "$P12_BASE64" | base64 --decode > "$W/identity.p12" )
+          security import "$W/identity.p12" -k "$KEYCHAIN" -f pkcs12 \
+            -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$W/identity.p12"
+          # Lets codesign use the key without a UI prompt, which would hang the job.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASSWORD" \
+            "$KEYCHAIN" > /dev/null
+          KEYCHAINS=()
+          while IFS= read -r k; do KEYCHAINS+=("$k"); done < "$W/keychains.before"
+          security list-keychains -d user -s "$KEYCHAIN" ${KEYCHAINS[@]+"${KEYCHAINS[@]}"}
+
+          valid() {
+            security find-identity -v -p codesigning "$KEYCHAIN" \
+              | sed -n 's/^ *\([0-9][0-9]*\) valid identit.* found$/\1/p'
+          }
+          # A runner image without the G2 intermediate cannot build the chain on its own.
+          if [ "$(valid)" = 0 ]; then
+            CA=Scripts/certs/DeveloperIDG2CA.cer
+            echo "$DEVELOPER_ID_G2_SHA256  $CA" | shasum -a 256 -c -
+            security import "$CA" -k "$KEYCHAIN"
+          fi
+          if [ "$(valid)" = 0 ]; then
+            echo "::error::no valid signing identity in DEVELOPER_ID_P12_BASE64. Export the Developer ID Application certificate with its private key, and check it has not expired or been revoked."
+            exit 1
+          fi
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -v team="($TEAM_ID)\"" '/"Developer ID Application: / && index($0, team) { print $2 }')"
+          if ! [[ "$IDENTITY" =~ ^[0-9A-F]{40}$ ]]; then
+            echo "::error::expected exactly one Developer ID Application identity for team $TEAM_ID"
+            exit 1
+          fi
+          { echo "KEYCHAIN=$KEYCHAIN"; echo "IDENTITY=$IDENTITY"; } >> "$GITHUB_ENV"
+
+      - name: Sign
+        env:
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          Scripts/sign-app.sh --identity "$IDENTITY" --keychain "$KEYCHAIN" "$APP"
+          Scripts/check-signature.sh --developer-id "$TEAM_ID" \
+            "$APP" "$APP/Contents/Helpers/wallspan"
+
+      - name: Drop the signing identity
+        run: |
+          set -euo pipefail
+          security delete-keychain "$KEYCHAIN"
+          KEYCHAINS=()
+          while IFS= read -r k; do KEYCHAINS+=("$k"); done < "$W/keychains.before"
+          security list-keychains -d user -s ${KEYCHAINS[@]+"${KEYCHAINS[@]}"}
+
+      - name: Notarise and staple
+        env:
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          KEY="$W/AuthKey.p8"
+          trap 'rm -f "$KEY"' EXIT
+          ( umask 077; printf '%s\n' "$NOTARY_API_KEY_P8" > "$KEY" )
+          chmod 600 "$KEY"
+          AUTH=(--key "$KEY" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID")
+
+          # The bare CLI ships on its own as well, so it gets its own submission and verdict.
+          ditto -c -k --keepParent "$APP/Contents/Helpers/wallspan" "$W/notarize-cli.zip"
+          Scripts/notarize.sh "${AUTH[@]}" "$W/notarize-cli.zip"
+          ditto -c -k --keepParent "$APP" "$W/notarize-app.zip"
+          Scripts/notarize.sh "${AUTH[@]}" --staple "$APP" "$W/notarize-app.zip"
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          Scripts/package.sh --slug "${VERSION//+/.}" --docs "$W/build" --out "$W/release" \
+            "$APP" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Verify what ships
+        id: verify
+        env:
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          NAME: ${{ steps.package.outputs.name }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
+          BINARY: ${{ steps.package.outputs.binary }}
+          APP_ZIP: ${{ steps.package.outputs.app-zip }}
+        run: |
+          set -euo pipefail
+          S="$W/shipped"
+          mkdir -p "$S/app" "$S/tar"
+          ditto -x -k "$APP_ZIP" "$S/app"
+          tar -xzf "$TARBALL" -C "$S/tar"
+          # One signed CLI leaves three ways, and each has to be the notarised bytes.
+          cmp "$BINARY" "$S/tar/$NAME/wallspan"
+          cmp "$BINARY" "$S/app/Wallspan.app/Contents/Helpers/wallspan"
+          ( cd "$W/release" && shasum -a 256 -c SHA256SUMS.txt )
+          Scripts/check-signature.sh --developer-id "$TEAM_ID" --notarized \
+            "$S/app/Wallspan.app" "$S/app/Wallspan.app/Contents/Helpers/wallspan" "$BINARY"
+          echo "signing=developer-id+notarized" >> "$GITHUB_OUTPUT"
+          echo "Signing: Developer ID ($TEAM_ID), notarised, app stapled" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed
+          path: ${{ runner.temp }}/sign/release/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Tear down
+        # The backstop for a step that failed while holding the identity or the notary key.
+        if: always()
+        run: |
+          set +e
+          W="$RUNNER_TEMP/sign"
+          rm -f "$W/identity.p12" "$W/AuthKey.p8"
+          if [ -e "$W/signing.keychain-db" ]; then
+            security delete-keychain "$W/signing.keychain-db" || rm -f "$W/signing.keychain-db"
+          fi
+          if [ -s "$W/keychains.before" ]; then
+            KEYCHAINS=()
+            while IFS= read -r k; do KEYCHAINS+=("$k"); done < "$W/keychains.before"
+            security list-keychains -d user -s "${KEYCHAINS[@]}"
+          fi
+
+  release:
+    needs: [resolve, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Require the Developer ID signature
+        env:
+          SIGNING: ${{ needs.sign.outputs.signing }}
+        run: |
+          if [ "$SIGNING" != developer-id+notarized ]; then
+            echo "::error::the sign job reported '$SIGNING', not developer-id+notarized"
+            exit 1
+          fi
+
+      - name: Download the signed assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run download "$GITHUB_RUN_ID" --name signed --dir dist
+
+      - name: Compose the release notes
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          SLUG="${VERSION//+/.}"
+          NAME="wallspan-$SLUG-universal"
+          ZIP="Wallspan-$SLUG.zip"
+          # An allow_unmerged SHA may be on no branch the checkout fetched.
+          git fetch --no-tags origin "$SHA"
           {
-            Scripts/changelog.sh --to '${{ steps.check.outputs.sha }}' \
-              --repo '${{ github.repository }}'
+            Scripts/changelog.sh --to "$SHA" --repo "$REPO"
             cat <<NOTES
 
           ---
 
-          Universal binary (arm64 + x86_64), macOS 14+.
+          Universal binary (arm64 + x86_64), macOS 14+. Signed with a Developer ID and
+          notarised by Apple.
 
           \`\`\`sh
           tar -xzf $NAME.tar.gz
           cd $NAME
-          xattr -c wallspan   # unsigned: macOS quarantines downloads
           ./wallspan info
           \`\`\`
 
           \`$NAME\` is the same binary without the tarball, for an install script or a
           formula. A downloaded file carries no executable bit, so it needs \`chmod +x\`.
 
+          A bare command-line binary cannot carry its notarisation ticket with it, so the
+          first time a downloaded copy runs, macOS checks with Apple online: run it once
+          with a network connection.
+
           \`Wallspan.app\` is the menu bar app; it bundles the same CLI and prefers
           whichever \`wallspan\` is on your PATH.
 
           \`\`\`sh
-          unzip $(basename '${{ steps.build.outputs.app-zip }}')
-          xattr -dr com.apple.quarantine Wallspan.app
+          unzip $ZIP
           open Wallspan.app
           \`\`\`
-
-          Neither is signed or notarised, so Gatekeeper blocks them until the \`xattr\`
-          lines above.
 
           Verify what you downloaded:
 
@@ -143,32 +462,42 @@ jobs:
           shasum -c SHA256SUMS.txt
           \`\`\`
           NOTES
-          } > dist/NOTES.md
-          cat dist/NOTES.md
+          } > "$RUNNER_TEMP/NOTES.md"
+          cat "$RUNNER_TEMP/NOTES.md"
 
       - name: Draft the release
         # `gh`, not a third-party action: this job holds contents:write, and the fewer
         # things that run inside it holding that, the better.
-        #
-        # --target takes the resolved SHA. GitHub creates the tag from it at publish time,
-        # so a branch name here would tag wherever that branch had moved to by then.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
-          ARGS=(--draft
-                --title '${{ steps.check.outputs.tag }}'
-                --target '${{ steps.check.outputs.sha }}'
-                --notes-file dist/NOTES.md)
-          if [ '${{ inputs.prerelease }}' = true ]; then ARGS+=(--prerelease); fi
+          # Again, because a tag or draft may have appeared while the build and sign ran.
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "::error::tag $TAG appeared since resolve checked"
+            exit 1
+          fi
+          RELEASES="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')"
+          if grep -Fxq -- "$TAG" <<<"$RELEASES"; then
+            echo "::error::a release for $TAG appeared since resolve checked (it may be a draft)"
+            exit 1
+          fi
 
-          gh release create '${{ steps.check.outputs.tag }}' "${ARGS[@]}" \
-            '${{ steps.build.outputs.tarball }}' \
-            '${{ steps.build.outputs.binary }}' \
-            '${{ steps.build.outputs.app-zip }}' \
-            '${{ steps.build.outputs.checksums }}'
+          SLUG="${VERSION//+/.}"
+          NAME="wallspan-$SLUG-universal"
+          # --target takes the resolved SHA. GitHub creates the tag from it at publish time,
+          # so a branch name here would tag wherever that branch had moved to by then.
+          ARGS=(--draft --title "$TAG" --target "$SHA" --notes-file "$RUNNER_TEMP/NOTES.md")
+          if [ "$PRERELEASE" = true ]; then ARGS+=(--prerelease); fi
 
-          echo "### Draft release ${{ steps.check.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Built from \`${{ steps.check.outputs.sha }}\`. The tag is created when you publish it." >> "$GITHUB_STEP_SUMMARY"
-          gh release view '${{ steps.check.outputs.tag }}' --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
+          gh release create "$TAG" "${ARGS[@]}" \
+            "dist/$NAME.tar.gz" "dist/$NAME" "dist/Wallspan-$SLUG.zip" dist/SHA256SUMS.txt
+
+          echo "### Draft release $TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built from \`$SHA\`, signed and notarised. The tag is created when you publish it." >> "$GITHUB_STEP_SUMMARY"
+          gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

@@ -1,8 +1,9 @@
 name: Build and package
 description: >
-  Stamps the version, runs the unit tests, builds the universal CLI and Wallspan.app,
-  verifies both, and packages the release assets. Shared by CI and the release workflow so
-  the artifacts a release ships are produced by exactly the steps that gated every PR.
+  Stamps the version, runs the unit tests, builds the universal Wallspan.app (ad-hoc,
+  hardened runtime), verifies it and the CLI inside it, and packages the assets from it.
+  Shared by CI and the release workflow so the artifacts a release ships are produced by
+  exactly the steps that gated every PR; release.yml then re-signs them with a Developer ID.
 
 inputs:
   channel:
@@ -32,11 +33,11 @@ outputs:
     description: Path to the CLI tarball.
     value: ${{ steps.package.outputs.tarball }}
   binary:
-    description: Path to the bare CLI binary.
+    description: Path to the bare CLI binary, copied from the bundle.
     value: ${{ steps.package.outputs.binary }}
   app-zip:
     description: Path to the Wallspan.app zip.
-    value: ${{ steps.app.outputs.zip }}
+    value: ${{ steps.package.outputs.app-zip }}
   checksums:
     description: Path to SHA256SUMS.txt.
     value: ${{ steps.package.outputs.checksums }}
@@ -71,29 +72,87 @@ runs:
       # Debug and host-arch only: these cover the app's logic, not the universal link.
       run: swift test
 
-    - name: Build universal
+    - name: Build Wallspan.app
+      id: app
       shell: bash
-      run: swift build -c release --arch arm64 --arch x86_64
-
-    - name: Locate and verify the binary
-      id: bin
-      shell: bash
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        BUNDLE_VERSION: ${{ steps.version.outputs.bundle_version }}
       run: |
         set -euo pipefail
-        BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/wallspan"
-        test -x "$BIN"
+        # --version, not the script's `git describe` fallback: stamping dirtied the tree,
+        # so a describe would brand every CI build `-dirty`.
+        Scripts/make-app.sh --universal \
+          --version "$VERSION" --build-version "$BUNDLE_VERSION"
+        APP=dist/Wallspan.app
+        echo "path=$APP" >> "$GITHUB_OUTPUT"
+        # Every later check runs this copy: it is the one each asset ships, hardened as a
+        # release's will be.
+        echo "cli=$APP/Contents/Helpers/wallspan" >> "$GITHUB_OUTPUT"
+
+    - name: Verify the bundle
+      shell: bash
+      env:
+        APP: ${{ steps.app.outputs.path }}
+      run: |
+        set -euo pipefail
+        # The bundle is what users double-click, so a broken signature or a missing
+        # helper has to fail here rather than on their machine.
+        Scripts/check-signature.sh "$APP" "$APP/Contents/Helpers/wallspan"
+        test -x "$APP/Contents/MacOS/Wallspan"
+        test -x "$APP/Contents/Helpers/wallspan"
+        # Catches the copy being reordered after codesign, which strips it from the seal.
+        test -f "$APP/Contents/Resources/AppIcon.icns"
         # A missing arch would otherwise ship silently as a single-arch build.
-        ARCHS="$(lipo -archs "$BIN")"
-        echo "archs: $ARCHS"
-        for want in arm64 x86_64; do
-          case " $ARCHS " in *" $want "*) ;; *) echo "::error::$want missing from $ARCHS"; exit 1;; esac
+        for exe in "$APP/Contents/MacOS/Wallspan" "$APP/Contents/Helpers/wallspan"; do
+          ARCHS="$(lipo -archs "$exe")"
+          echo "$exe: $ARCHS"
+          for want in arm64 x86_64; do
+            case " $ARCHS " in
+              *" $want "*) ;;
+              *) echo "::error::$want missing from $exe ($ARCHS)"; exit 1 ;;
+            esac
+          done
         done
-        echo "path=$BIN" >> "$GITHUB_OUTPUT"
+        FLAGS="$(codesign -dv "$APP" 2>&1 \
+          | sed -n 's/^CodeDirectory .*flags=0x[0-9a-f]*(\([^)]*\)).*/\1/p')"
+        echo "Signing: \`$FLAGS\` (Developer ID and notarisation happen only in release.yml)" \
+          >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Self-test the signature checker
+      # A checker that accepted anything would wave through a release without the runtime.
+      shell: bash
+      env:
+        CLI: ${{ steps.app.outputs.cli }}
+      run: |
+        set -euo pipefail
+        T="$(mktemp -d)"
+        cp "$CLI" "$T/unsigned"
+        codesign --remove-signature "$T/unsigned"
+        cp "$CLI" "$T/no-runtime"
+        codesign --force --sign - --timestamp=none "$T/no-runtime"
+
+        expect_rejected() {
+          local out
+          if out="$(Scripts/check-signature.sh "$T/$1" 2>&1)"; then
+            echo "::error::check-signature.sh accepted the $1 copy"
+            exit 1
+          fi
+          if ! grep -q "FAIL .*$2" <<<"$out"; then
+            printf '%s\n' "$out"
+            echo "::error::check-signature.sh rejected the $1 copy, but not because it $2"
+            exit 1
+          fi
+          echo "rejected $1: $2"
+        }
+        expect_rejected unsigned 'does not verify'
+        expect_rejected no-runtime 'hardened runtime off'
+        rm -rf "$T"
 
     - name: Verify the stamp took
       shell: bash
       env:
-        BIN: ${{ steps.bin.outputs.path }}
+        BIN: ${{ steps.app.outputs.cli }}
         WANT: ${{ steps.version.outputs.version }}
       run: |
         set -euo pipefail
@@ -105,9 +164,10 @@ runs:
 
     - name: Smoke test
       shell: bash
+      env:
+        BIN: ${{ steps.app.outputs.cli }}
       run: |
         set -euo pipefail
-        BIN='${{ steps.bin.outputs.path }}'
         # These assert "does not crash" - they exercise layout construction, config
         # loading and JSON decode. Asserting on display counts here would be testing
         # the runner's hardware, not wallspan.
@@ -135,68 +195,16 @@ runs:
       # schedule - so a field quietly dropped here is only found by a user whose app
       # stops working. Shape is asserted, not values: a runner has no display.
       shell: bash
-      run: Scripts/check-json-contract.sh '${{ steps.bin.outputs.path }}'
-
-    - name: Build Wallspan.app
-      id: app
-      shell: bash
       env:
-        VERSION: ${{ steps.version.outputs.version }}
-        BUNDLE_VERSION: ${{ steps.version.outputs.bundle_version }}
-      run: |
-        set -euo pipefail
-        # --version, not the script's `git describe` fallback: stamping dirtied the tree,
-        # so a describe would brand every CI build `-dirty`.
-        Scripts/make-app.sh --universal \
-          --version "$VERSION" --build-version "$BUNDLE_VERSION"
-        APP=dist/Wallspan.app
-        # The bundle is what users double-click, so a broken signature or a missing
-        # helper has to fail here rather than on their machine.
-        codesign --verify --deep --strict "$APP"
-        test -x "$APP/Contents/MacOS/Wallspan"
-        test -x "$APP/Contents/Helpers/wallspan"
-        # Catches the copy being reordered after codesign, which strips it from the seal.
-        test -f "$APP/Contents/Resources/AppIcon.icns"
-        for want in arm64 x86_64; do
-          lipo -archs "$APP/Contents/MacOS/Wallspan" | grep -qw "$want" \
-            || { echo "::error::$want missing from the app binary"; exit 1; }
-        done
-        echo "zip=$(ls dist/Wallspan-*.zip)" >> "$GITHUB_OUTPUT"
+        BIN: ${{ steps.app.outputs.cli }}
+      run: Scripts/check-json-contract.sh "$BIN"
 
     - name: Package
       id: package
       shell: bash
       env:
         SLUG: ${{ steps.version.outputs.slug }}
-        BIN: ${{ steps.bin.outputs.path }}
-        APP_ZIP: ${{ steps.app.outputs.zip }}
+        APP: ${{ steps.app.outputs.path }}
       run: |
         set -euo pipefail
-        NAME="wallspan-$SLUG-universal"
-        ZIP="$(basename "$APP_ZIP")"
-
-        # Staged under dist/stage so the tarball's root directory and the bare binary can
-        # share a name without one being copied inside the other.
-        mkdir -p "dist/stage/$NAME"
-        cp "$BIN" "dist/stage/$NAME/wallspan"
-        cp README.md LICENSE "dist/stage/$NAME/"
-        # The README's banner is a repo-relative path, so it dangles without this.
-        cp -R brand "dist/stage/$NAME/"
-        # tar, not a bare binary: neither GitHub's artifact upload nor a browser download
-        # preserves the executable bit, so an unpacked binary arrives chmod 644.
-        tar -C dist/stage -czf "dist/$NAME.tar.gz" "$NAME"
-        # Shipped alongside anyway, for an install script or a Homebrew formula that would
-        # rather not unpack a tarball. It needs a chmod, and the release notes say so.
-        cp "$BIN" "dist/$NAME"
-
-        # Bare filenames, so `shasum -c SHA256SUMS.txt` works in whatever directory the
-        # assets were downloaded into.
-        ( cd dist && shasum -a 256 "$NAME.tar.gz" "$NAME" "$ZIP" > SHA256SUMS.txt )
-        cat dist/SHA256SUMS.txt
-
-        {
-          echo "name=$NAME"
-          echo "tarball=dist/$NAME.tar.gz"
-          echo "binary=dist/$NAME"
-          echo "checksums=dist/SHA256SUMS.txt"
-        } >> "$GITHUB_OUTPUT"
+        Scripts/package.sh --slug "$SLUG" "$APP" | tee -a "$GITHUB_OUTPUT"

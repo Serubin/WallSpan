@@ -6,6 +6,8 @@ name: tap
 # because release.yml deliberately stops at a draft: GitHub creates the tag, and makes the
 # assets publicly downloadable, only when a human publishes it. A bump wired into the build
 # would be pointing the tap at a URL that does not resolve yet.
+
+# Releases are notarised, so once the tap points at one the cask needs no quarantine caveat.
 on:
   release:
     types: [published]
