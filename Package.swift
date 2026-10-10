@@ -20,5 +20,6 @@ let package = Package(
             name: "WallspanApp",
             dependencies: ["CalibrationLattice"]
         ),
+        .testTarget(name: "WallspanAppTests", dependencies: ["WallspanApp"]),
     ]
 )
