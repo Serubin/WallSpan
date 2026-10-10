@@ -58,6 +58,36 @@ final class SemanticVersionTests: XCTestCase {
         }
     }
 
+    /// Shared with tap.yml's Python comparison, so the app and the tap agree.
+    func testBetaTrackVectors() {
+        let ascending = ["0.2.0-beta.2", "0.2.0-beta.10", "0.2.0-rc.1", "0.2.0", "0.3.0-beta.1"]
+            .map { SemanticVersion($0)! }
+        for (lower, higher) in zip(ascending, ascending.dropFirst()) {
+            XCTAssertLessThan(lower, higher)
+        }
+    }
+
+    func testIsBeta() {
+        for beta in ["0.2.0-beta.1", "v0.2.0-beta.10", "0.2.0-rc.1", "0.2.0-beta.1+gabc1234"] {
+            XCTAssertTrue(SemanticVersion(beta)!.isBeta, beta)
+        }
+        for other in ["0.2.0", "0.2.0-snapshot.7", "0.1.0-3-gabc1234", "0.2.0-unsigned.1",
+                      "0.2.0-beta", "0.2.0-beta.0", "0.2.0-beta.01", "0.2.0-beta.1.1",
+                      "0.2.0-beta.x", "0.2.0-dev.pr42"] {
+            XCTAssertFalse(SemanticVersion(other)!.isBeta, other)
+        }
+    }
+
+    func testTrackableTags() {
+        for tag in ["v0.2.0", "v0.2.0-beta.3", "v0.2.0-rc.1"] {
+            XCTAssertTrue(SemanticVersion.isTrackable(tag), tag)
+        }
+        for tag in ["v0.2.0-unsigned.1", "v0.2.0-snapshot.7", "v0.2.0-beta", "latest",
+                    "v0.2.0-beta.1-" + String(repeating: "a", count: 20)] {
+            XCTAssertFalse(SemanticVersion.isTrackable(tag), tag)
+        }
+    }
+
     func testBuildMetadataHasNoPrecedence() {
         let a = SemanticVersion("0.2.0-snapshot.7+gaaaaaaa")!
         let b = SemanticVersion("0.2.0-snapshot.7+gbbbbbbb")!

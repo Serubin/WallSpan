@@ -11,10 +11,16 @@ on:
         required: true
         default: main
       version:
-        description: Version to release, without the leading v (e.g. 0.2.0)
+        description: >-
+          X.Y.Z, X.Y.Z-beta.N, X.Y.Z-rc.N or X.Y.Z-unsigned.N, without the leading v; or
+          `beta` or `rc` for the next number of that kind
         required: true
       prerelease:
-        description: Mark the release as a prerelease
+        description: Mark the release as a prerelease (required for, and only for, a suffix)
+        type: boolean
+        default: false
+      unsigned:
+        description: Skip Developer ID signing (required for, and only for, -unsigned.N)
         type: boolean
         default: false
       allow_unmerged:
@@ -24,8 +30,9 @@ on:
 
 permissions: {}
 
+# One group for every version: two runs resolving `beta` at once would pick the same number.
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release
   cancel-in-progress: false
 
 # Only `sign` holds the Developer ID; it runs this workflow's own commit and never compiles.
@@ -40,6 +47,8 @@ jobs:
       sha: ${{ steps.check.outputs.sha }}
       tag: ${{ steps.check.outputs.tag }}
       version: ${{ steps.check.outputs.version }}
+      channel: ${{ steps.check.outputs.channel }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,19 +62,24 @@ jobs:
           GH_REPO: ${{ github.repository }}
           REF: ${{ inputs.ref }}
           VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          UNSIGNED: ${{ inputs.unsigned }}
           ALLOW_UNMERGED: ${{ inputs.allow_unmerged }}
         run: |
           set -euo pipefail
 
+          # [[ =~ ]], not grep: grep matches line by line, so a second line would ride along.
+          GRAMMAR='^[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc|unsigned)\.[1-9][0-9]*)?$'
           case "$VERSION" in
             v*) echo "::error::drop the leading v: pass the version without it"; exit 1 ;;
+            beta|rc) ;;
+            *)
+              if ! [[ "$VERSION" =~ $GRAMMAR ]]; then
+                echo "::error::the version input is not X.Y.Z, X.Y.Z-beta.N, X.Y.Z-rc.N, X.Y.Z-unsigned.N, beta or rc"
+                exit 1
+              fi
+              ;;
           esac
-          # [[ =~ ]], not grep: grep matches line by line, so a second line would ride along.
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::the version input is not a semver version"
-            exit 1
-          fi
-          TAG="v$VERSION"
 
           # A leading `-` would reach git as an option.
           if ! [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/@+-]*$ ]]; then
@@ -82,7 +96,53 @@ jobs:
           git fetch --no-tags origin "$REF"
           SHA="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
 
-          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+          # The tree has to already claim the version it is being tagged as. This is what
+          # keeps the post-release bump of baseVersion from being forgotten.
+          BASE="$(git show "$SHA:Sources/WallspanCore/Version.swift" \
+            | sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p')"
+          if ! [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version.swift at $SHA has no single X.Y.Z baseVersion"
+            exit 1
+          fi
+
+          # This workflow's copy of the script, never the ref's: this job holds contents:write.
+          case "$VERSION" in
+            beta|rc) VERSION="$(Scripts/next-prerelease.sh --kind "$VERSION" --base "$BASE")" ;;
+            *-beta.*|*-rc.*) Scripts/next-prerelease.sh --check "$VERSION" > /dev/null ;;
+          esac
+          # Again on the result, since it was built partly from the untrusted ref.
+          if ! [[ "$VERSION" =~ $GRAMMAR ]]; then
+            echo "::error::resolved a version that is not in the grammar"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          CORE="${VERSION%%-*}"
+          if [ "$BASE" != "$CORE" ]; then
+            echo "::error::Version.swift says baseVersion $BASE, but this would tag $CORE"
+            exit 1
+          fi
+
+          case "$VERSION" in
+            *-unsigned.*) CHANNEL=unsigned ;;
+            *-*) CHANNEL=beta ;;
+            *) CHANNEL=release ;;
+          esac
+          SUFFIXED=false
+          if [ "$CHANNEL" != release ]; then SUFFIXED=true; fi
+          if [ "$PRERELEASE" != "$SUFFIXED" ]; then
+            echo "::error::$VERSION needs prerelease=$SUFFIXED: it is set exactly when the version has a suffix"
+            exit 1
+          fi
+          IS_UNSIGNED=false
+          if [ "$CHANNEL" = unsigned ]; then IS_UNSIGNED=true; fi
+          if [ "$UNSIGNED" != "$IS_UNSIGNED" ]; then
+            echo "::error::$VERSION needs unsigned=$IS_UNSIGNED: only an -unsigned.N version skips signing"
+            exit 1
+          fi
+
+          # Assigned first so a failed ls-remote stops the job instead of reading as "no tag".
+          EXISTING="$(git ls-remote --tags origin "refs/tags/$TAG")"
+          if [ -n "$EXISTING" ]; then
             echo "::error::tag $TAG already exists"
             exit 1
           fi
@@ -93,19 +153,13 @@ jobs:
             echo "::error::a release for $TAG already exists (it may be a draft)"
             exit 1
           fi
-
-          # The tree has to already claim the version it is being tagged as. This is what
-          # keeps the post-release bump of baseVersion from being forgotten.
-          BASE="$(git show "$SHA:Sources/WallspanCore/Version.swift" \
-            | sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p')"
-          if ! [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version.swift at $SHA has no single X.Y.Z baseVersion"
-            exit 1
-          fi
-          CORE="${VERSION%%-*}"
-          if [ "$BASE" != "$CORE" ]; then
-            echo "::error::Version.swift says baseVersion $BASE, but this would tag $CORE"
-            exit 1
+          # Betas get this refusal from next-prerelease.sh; -unsigned.N never passes through it.
+          if [ "$CHANNEL" = unsigned ]; then
+            SHIPPED="$(git ls-remote --tags origin "refs/tags/v$BASE")"
+            if [ -n "$SHIPPED" ] || grep -Fxq -- "v$BASE" <<<"$RELEASES"; then
+              echo "::error::v$BASE already exists; bump baseVersion before cutting a prerelease"
+              exit 1
+            fi
           fi
 
           if [ "$ALLOW_UNMERGED" != true ]; then
@@ -120,10 +174,12 @@ jobs:
             echo "sha=$SHA"
             echo "tag=$TAG"
             echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+            echo "prerelease=$SUFFIXED"
           } >> "$GITHUB_OUTPUT"
           # Shown to whoever approves the release environment, before anything is signed.
-          echo "### Releasing \`$TAG\` from \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "releasing $TAG from $SHA"
+          echo "### Releasing \`$TAG\` (channel \`$CHANNEL\`) from \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "releasing $TAG ($CHANNEL) from $SHA"
 
   build:
     needs: resolve
@@ -140,25 +196,41 @@ jobs:
       - uses: ./.github/actions/build
         id: build
         with:
-          channel: release
+          channel: ${{ needs.resolve.outputs.channel }}
           version: ${{ needs.resolve.outputs.version }}
           sha: ${{ needs.resolve.outputs.sha }}
 
+      # An unsigned prerelease ships the ad-hoc assets as built; nothing re-signs them.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: needs.resolve.outputs.channel == 'unsigned'
+        with:
+          name: adhoc
+          path: |
+            ${{ steps.build.outputs.tarball }}
+            ${{ steps.build.outputs.binary }}
+            ${{ steps.build.outputs.app-zip }}
+            ${{ steps.build.outputs.checksums }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Bundle the app for signing
+        if: needs.resolve.outputs.channel != 'unsigned'
         run: |
           set -euo pipefail
           # tar, because upload-artifact drops the executable bits the bundle depends on.
-          tar -czf "$RUNNER_TEMP/unsigned.tar.gz" dist/Wallspan.app README.md LICENSE brand
+          tar -czf "$RUNNER_TEMP/to-sign.tar.gz" dist/Wallspan.app README.md LICENSE brand
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: needs.resolve.outputs.channel != 'unsigned'
         with:
-          name: unsigned
-          path: ${{ runner.temp }}/unsigned.tar.gz
+          name: to-sign
+          path: ${{ runner.temp }}/to-sign.tar.gz
           if-no-files-found: error
           retention-days: 7
 
   sign:
     needs: [resolve, build]
+    if: needs.resolve.outputs.channel != 'unsigned'
     runs-on: macos-latest
     timeout-minutes: 120
     # Approval and a main-only branch rule guard this environment's secrets. They reach argv
@@ -215,8 +287,8 @@ jobs:
           set -euo pipefail
           W="$RUNNER_TEMP/sign"
           mkdir -p "$W/download" "$W/build"
-          gh run download "$GITHUB_RUN_ID" --name unsigned --dir "$W/download"
-          tar -xzf "$W/download/unsigned.tar.gz" -C "$W/build"
+          gh run download "$GITHUB_RUN_ID" --name to-sign --dir "$W/download"
+          tar -xzf "$W/download/to-sign.tar.gz" -C "$W/build"
           APP="$W/build/dist/Wallspan.app"
 
           # Regular files and directories only: a symlink or FIFO from the built ref would
@@ -388,7 +460,12 @@ jobs:
           fi
 
   release:
-    needs: [resolve, sign]
+    needs: [resolve, build, sign]
+    # A skipped sign is accepted only for an unsigned prerelease; the first step re-checks.
+    if: >-
+      !cancelled() && needs.build.result == 'success'
+      && (needs.sign.result == 'success'
+          || (needs.sign.result == 'skipped' && needs.resolve.outputs.channel == 'unsigned'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -401,23 +478,36 @@ jobs:
 
       - name: Require the Developer ID signature
         env:
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          SIGN_RESULT: ${{ needs.sign.result }}
           SIGNING: ${{ needs.sign.outputs.signing }}
         run: |
-          if [ "$SIGNING" != developer-id+notarized ]; then
+          if [ "$CHANNEL" = unsigned ]; then
+            if [ "$SIGN_RESULT" != skipped ] || [ -n "$SIGNING" ]; then
+              echo "::error::an unsigned release must not have run the sign job"
+              exit 1
+            fi
+          elif [ "$SIGNING" != developer-id+notarized ]; then
             echo "::error::the sign job reported '$SIGNING', not developer-id+notarized"
             exit 1
           fi
 
-      - name: Download the signed assets
+      - name: Download the assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh run download "$GITHUB_RUN_ID" --name signed --dir dist
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = unsigned ]; then ARTIFACT=adhoc; else ARTIFACT=signed; fi
+          gh run download "$GITHUB_RUN_ID" --name "$ARTIFACT" --dir dist
+          ( cd dist && sha256sum -c SHA256SUMS.txt )
 
       - name: Compose the release notes
         env:
           SHA: ${{ needs.resolve.outputs.sha }}
           VERSION: ${{ needs.resolve.outputs.version }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -427,8 +517,51 @@ jobs:
           # An allow_unmerged SHA may be on no branch the checkout fetched.
           git fetch --no-tags origin "$SHA"
           {
+            if [ "$CHANNEL" = beta ]; then
+              cat <<BANNER
+          > **Beta.** Install it, and later betas and releases, with
+          > \`brew install --cask serubin/tap/wallspan@beta\`.
+
+          BANNER
+            fi
             Scripts/changelog.sh --to "$SHA" --repo "$REPO"
-            cat <<NOTES
+            if [ "$CHANNEL" = unsigned ]; then
+              cat <<NOTES
+
+          ---
+
+          **Unsigned test build.** Universal binary (arm64 + x86_64), macOS 14+.
+
+          \`\`\`sh
+          tar -xzf $NAME.tar.gz
+          cd $NAME
+          xattr -c wallspan   # unsigned: macOS quarantines downloads
+          ./wallspan info
+          \`\`\`
+
+          \`$NAME\` is the same binary without the tarball, for an install script or a
+          formula. A downloaded file carries no executable bit, so it needs \`chmod +x\`.
+
+          \`Wallspan.app\` is the menu bar app; it bundles the same CLI and prefers
+          whichever \`wallspan\` is on your PATH.
+
+          \`\`\`sh
+          unzip $ZIP
+          xattr -dr com.apple.quarantine Wallspan.app
+          open Wallspan.app
+          \`\`\`
+
+          Neither is signed or notarised, so Gatekeeper blocks them until the \`xattr\`
+          lines above.
+
+          Verify what you downloaded:
+
+          \`\`\`sh
+          shasum -c SHA256SUMS.txt
+          \`\`\`
+          NOTES
+            else
+              cat <<NOTES
 
           ---
 
@@ -462,6 +595,7 @@ jobs:
           shasum -c SHA256SUMS.txt
           \`\`\`
           NOTES
+            fi
           } > "$RUNNER_TEMP/NOTES.md"
           cat "$RUNNER_TEMP/NOTES.md"
 
@@ -474,11 +608,13 @@ jobs:
           SHA: ${{ needs.resolve.outputs.sha }}
           TAG: ${{ needs.resolve.outputs.tag }}
           VERSION: ${{ needs.resolve.outputs.version }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
         run: |
           set -euo pipefail
           # Again, because a tag or draft may have appeared while the build and sign ran.
-          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+          EXISTING="$(git ls-remote --tags origin "refs/tags/$TAG")"
+          if [ -n "$EXISTING" ]; then
             echo "::error::tag $TAG appeared since resolve checked"
             exit 1
           fi
@@ -498,6 +634,8 @@ jobs:
           gh release create "$TAG" "${ARGS[@]}" \
             "dist/$NAME.tar.gz" "dist/$NAME" "dist/Wallspan-$SLUG.zip" dist/SHA256SUMS.txt
 
-          echo "### Draft release $TAG" >> "$GITHUB_STEP_SUMMARY"
-          echo "Built from \`$SHA\`, signed and notarised. The tag is created when you publish it." >> "$GITHUB_STEP_SUMMARY"
+          SIGNED="signed and notarised"
+          if [ "$CHANNEL" = unsigned ]; then SIGNED="ad-hoc signed only"; fi
+          echo "### Draft release $TAG ($CHANNEL)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built from \`$SHA\`, $SIGNED. The tag is created when you publish it." >> "$GITHUB_STEP_SUMMARY"
           gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

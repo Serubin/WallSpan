@@ -241,7 +241,7 @@ final class CommandLineToolTests: XCTestCase {
         try caskroom()
         XCTAssertTrue(InstallSource.isCaskLink(linked, brewPrefixes: brewPrefixes))
         XCTAssertEqual(InstallSource.cli(linked, ownBundle: thisApp, brewPrefixes: brewPrefixes),
-                       .homebrewCask)
+                       .homebrewCask(.stable))
     }
 
     func testCaskRuleAcceptsALinkIntoTheCaskroom() throws {

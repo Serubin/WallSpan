@@ -24,6 +24,9 @@ final class ContractTests: XCTestCase {
 
         let snapshot = try version(#"{"version":"0.2.0-snapshot.7","channel":"snapshot","schema":3}"#)
         XCTAssertEqual(snapshot.summary, "0.2.0-snapshot.7 (snapshot, schema 3)")
+
+        let beta = try version(#"{"version":"0.2.0-beta.1","channel":"beta","schema":1}"#)
+        XCTAssertEqual(beta.summary, "0.2.0-beta.1 (beta, schema 1)")
     }
 
     func testSummaryOmitsReleaseAndMissingChannel() throws {

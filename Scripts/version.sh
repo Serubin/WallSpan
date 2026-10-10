@@ -7,12 +7,14 @@
 # another.
 #
 #   release   0.2.0
-#   snapshot  0.2.0-snapshot.7+g1a2b3c4     7 = commits since the last v* tag
+#   beta      0.2.0-beta.3, 0.2.0-rc.1      a signed prerelease
+#   unsigned  0.2.0-unsigned.1              an ad-hoc prerelease, never offered as an update
+#   snapshot  0.2.0-snapshot.7+g1a2b3c4     7 = commits since the last stable v* tag
 #   dev       0.2.0-dev.pr42+g1a2b3c4
 #   local     0.1.0                         an unstamped working tree
 #
-# usage: Scripts/version.sh --channel release|snapshot|dev|local
-#                           [--version X.Y.Z] [--pr N] [--sha REF] [--stamp]
+# usage: Scripts/version.sh --channel release|beta|unsigned|snapshot|dev|local
+#                           [--version VERSION] [--pr N] [--sha REF] [--stamp]
 #
 # Prints `key=value` lines, appendable straight to $GITHUB_OUTPUT.
 set -euo pipefail
@@ -34,7 +36,7 @@ while [ $# -gt 0 ]; do
         --pr)      PR="${2-}"; shift 2 ;;
         --sha|--ref) REF="${2-}"; shift 2 ;;
         --stamp)   STAMP=1; shift ;;
-        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -52,9 +54,10 @@ SHORT="$(git rev-parse --short=7 "$SHA")"
 # count that resets at each tag would go backwards.
 TOTAL="$(git rev-list --count "$SHA")"
 
-# --match, because the repo carries backup/*, spr-backup/* and squashed/* tags that are
-# not releases and must never be mistaken for one.
-LAST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$SHA" 2>/dev/null || true)"
+# --match skips the backup/*, spr-backup/* and squashed/* tags; --exclude skips betas,
+# whose tags would reset the count and send snapshot numbers backwards.
+LAST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$SHA" \
+    2>/dev/null || true)"
 if [ -n "$LAST_TAG" ]; then
     SINCE="$(git rev-list --count "$LAST_TAG..$SHA")"
 else
@@ -64,6 +67,19 @@ fi
 case "$CHANNEL" in
     release)
         FULL="${VERSION:-$BASE}"
+        [ "$FULL" = "$BASE" ] || die "a release must be exactly baseVersion $BASE, not $FULL"
+        ;;
+    beta)
+        [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(beta|rc)\.[1-9][0-9]*$ ]] \
+            || die "--channel beta needs --version X.Y.Z-beta.N or X.Y.Z-rc.N"
+        [ "${BASH_REMATCH[1]}" = "$BASE" ] || die "$VERSION is not a prerelease of $BASE"
+        FULL="$VERSION"
+        ;;
+    unsigned)
+        [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-unsigned\.[1-9][0-9]*$ ]] \
+            || die "--channel unsigned needs --version X.Y.Z-unsigned.N"
+        [ "${BASH_REMATCH[1]}" = "$BASE" ] || die "$VERSION is not a prerelease of $BASE"
+        FULL="$VERSION"
         ;;
     snapshot)
         FULL="$BASE-snapshot.$SINCE+g$SHORT"
@@ -118,7 +134,8 @@ extension Wallspan {
     /// Empty in a working tree, so \`version\` falls back to \`baseVersion\`.
     static let stampedVersion = "$STAMPED"
 
-    /// How this build was produced: \`release\`, \`snapshot\`, \`dev\`, or \`local\`.
+    /// How this build was produced: \`release\`, \`beta\`, \`unsigned\`, \`snapshot\`, \`dev\`, or
+    /// \`local\`.
     public static let channel = "$CHANNEL"
 
     /// Short commit the build came from; empty when it was not stamped.
