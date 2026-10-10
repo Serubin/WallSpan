@@ -30,9 +30,10 @@ final class CalibrationWindowController: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
-        // Above the overlay but not above everything: the user is looking past this window
-        // at the pattern, and may want another app in front of it.
-        window.level = .normal
+        // The overlay covers every window, so these controls must sit above it, on every Space
+        // the overlay follows.
+        window.level = CalibrationLevel.controls
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.window = window
 
         // Clicking a screen activates the app; the arrow keys need this window to be key.

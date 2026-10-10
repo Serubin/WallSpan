@@ -264,20 +264,22 @@ struct CalibrationView: View {
             alert.addButton(withTitle: "Cancel")
             if plan.canRevert { alert.addButton(withTitle: "Revert to Saved") }
 
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
-                model.applyArrange { done in
-                    guard done?.applied == true else { return }
-                    notice("Aligned", "Your previous arrangement was saved. Reopen this "
-                           + "window and choose Revert to Saved to put it back.")
+            Self.present(alert) { response in
+                switch response {
+                case .alertFirstButtonReturn:
+                    model.applyArrange { done in
+                        guard done?.applied == true else { return }
+                        notice("Aligned", "Your previous arrangement was saved. Reopen this "
+                               + "window and choose Revert to Saved to put it back.")
+                    }
+                case .alertThirdButtonReturn:
+                    model.revertArrange { _ in
+                        notice("Reverted", "The arrangement macOS had before wallspan "
+                               + "touched it has been restored.")
+                    }
+                default:
+                    break
                 }
-            case .alertThirdButtonReturn:
-                model.revertArrange { _ in
-                    notice("Reverted", "The arrangement macOS had before wallspan touched "
-                           + "it has been restored.")
-                }
-            default:
-                break
             }
         }
     }
@@ -286,7 +288,18 @@ struct CalibrationView: View {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = detail
-        alert.runModal()
+        Self.present(alert)
+    }
+
+    /// As a sheet on the controls: a free-standing alert runs at modal-panel level, under the
+    /// overlay.
+    private static func present(
+        _ alert: NSAlert, then done: @escaping (NSApplication.ModalResponse) -> Void = { _ in }
+    ) {
+        guard let controls = NSApp.windows.first(where: {
+            $0.level == CalibrationLevel.controls && $0.isVisible
+        }) else { return done(alert.runModal()) }
+        alert.beginSheetModal(for: controls, completionHandler: done)
     }
 
     private func format(_ mm: Double) -> String {
