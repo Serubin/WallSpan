@@ -732,6 +732,7 @@ final class Cycler {
     var timer: Timer?
     var configWatch: Timer?
     var configMTime: Date?
+    var layoutMTime: Date?
     var debounce: DispatchWorkItem?
     /// Backoff while the playlist directory is unavailable: a folder on an external or
     /// network volume is genuinely absent at login, and under KeepAlive exiting respawns.
@@ -775,12 +776,23 @@ final class Cycler {
     /// otherwise lowering an hourly interval means waiting an hour. mtime, not a
     /// `DispatchSource` watch: `ConfigStore.save` replaces the inode, deafening a watch.
     func startConfigWatch() {
+        func modified(_ url: URL) -> Date? {
+            (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
+        }
         let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let m = (try? FileManager.default.attributesOfItem(atPath: ConfigStore.url.path)[.modificationDate]) as? Date
-            guard m != self.configMTime else { return }
-            self.configMTime = m
-            self.reloadConfigIfChanged()
+            let m = modified(ConfigStore.url)
+            if m != self.configMTime {
+                self.configMTime = m
+                self.reloadConfigIfChanged()
+            }
+            // Calibration edits the layout without reconfiguring a display, so nothing else
+            // tells a running cycle the desktop is now drawn for the wrong one.
+            let l = modified(PhysicalLayoutStore.configURL)
+            if l != self.layoutMTime {
+                self.layoutMTime = l
+                self.layoutChanged()
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         configWatch = t
@@ -1059,8 +1071,8 @@ final class Cycler {
         try? StateStore.save(after)
     }
 
-    /// Display arrangement changed: re-render the *current* image for the new layout
-    /// rather than advancing the playlist.
+    /// Display arrangement or calibration changed: re-render the *current* image for the new
+    /// layout rather than advancing the playlist.
     func layoutChanged() {
         debounce?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -1075,8 +1087,10 @@ final class Cycler {
             guard let newLayout = try? PhysicalLayoutStore.current() else { return }
             guard newLayout.fingerprint != self.layout.fingerprint else { return }
             self.layout = newLayout
-            print("[\(timestamp())] display arrangement changed -> "
+            print("[\(timestamp())] layout changed -> "
                   + "union \(Int(newLayout.unionMM.width))x\(Int(newLayout.unionMM.height))mm, re-rendering")
+            // Spaces this apply cannot reach still hold the render for the old layout.
+            self.invalidateCoverage("layout changed")
             if let img = self.current { self.applyAndRecord(img, layout: newLayout) }
         }
         debounce = work
