@@ -44,6 +44,23 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(v.summary, "unknown (schema 0)")
     }
 
+    func testSupportedSchemasSpanMinimumToMaximum() {
+        XCTAssertEqual(Contract.supportedSchemas, Contract.minimumSchema...Contract.maximumSchema)
+        XCTAssertTrue(Contract.supportedSchemas.contains(1))
+        XCTAssertFalse(Contract.supportedSchemas.contains(0))
+        XCTAssertFalse(Contract.supportedSchemas.contains(Contract.maximumSchema + 1))
+    }
+
+    func testDescribeNamesOneSchemaOrARange() {
+        XCTAssertEqual(Contract.describe(1...1), "schema 1")
+        XCTAssertEqual(Contract.describe(1...3), "schemas 1–3")
+    }
+
+    func testIncompatibleNamesBothSides() {
+        let message = CLIRunner.RunError.incompatible(schema: 2).errorDescription
+        XCTAssertEqual(message, "wallspan speaks schema 2; this app understands schema 1")
+    }
+
     func testSupportsReadsTheAdvertisedCommands() throws {
         let v = try version(#"{"version":"0.2.0","schema":1,"commands":["status","arrange"]}"#)
         XCTAssertTrue(v.supports("arrange"))

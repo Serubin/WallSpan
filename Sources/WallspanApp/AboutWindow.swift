@@ -38,9 +38,11 @@ final class AboutModel: ObservableObject {
 final class AboutWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var model: AboutModel?
+    private var onCheckForUpdates: (() -> Void)?
 
-    func show(info: AboutInfo) {
+    func show(info: AboutInfo, onCheckForUpdates: @escaping () -> Void) {
         NSApp.activate(ignoringOtherApps: true)
+        self.onCheckForUpdates = onCheckForUpdates
         if let window {
             model?.info = info
             window.makeKeyAndOrderFront(nil)
@@ -51,7 +53,11 @@ final class AboutWindowController: NSObject, NSWindowDelegate {
         self.model = model
 
         let controller = NSHostingController(
-            rootView: AboutView(model: model) { [weak self] in self?.window?.close() }
+            rootView: AboutView(
+                model: model,
+                onCheckForUpdates: { [weak self] in self?.onCheckForUpdates?() },
+                onClose: { [weak self] in self?.window?.close() }
+            )
         )
         let window = NSWindow(contentViewController: controller)
         window.title = "About Wallspan"

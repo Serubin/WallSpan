@@ -21,8 +21,8 @@ struct CLIRunner {
             case .unparseable(let out):
                 return "unexpected output from wallspan: \(out.prefix(200))"
             case .incompatible(let schema):
-                return "wallspan speaks schema \(schema); this app needs "
-                    + "\(Contract.minimumSchema) or newer"
+                return "wallspan speaks schema \(schema); this app understands "
+                    + Contract.describe(Contract.supportedSchemas)
             }
         }
     }
@@ -59,10 +59,11 @@ struct CLIRunner {
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
-    /// A `Contract.Failure` is thrown as-is, so callers can branch on its stable `code`.
-    func json<T: Decodable>(
+    /// A `Contract.Failure` is thrown as-is, so callers can branch on its stable `code`. No
+    /// schema check: the probe has to read a newer CLI's schema to say why it passed it over.
+    func envelope<T: Decodable>(
         _ type: T.Type, key: String, _ arguments: [String], timeout: TimeInterval = 30
-    ) throws -> T {
+    ) throws -> Envelope<T> {
         let result = try CLIRunner.capture(binary, arguments + ["--json"], timeout: timeout)
 
         let decoder = JSONDecoder()
@@ -74,11 +75,20 @@ struct CLIRunner {
         else { throw RunError.unparseable(result.stdout) }
 
         if let failure = envelope.failure { throw failure }
-        guard envelope.schema >= Contract.minimumSchema else {
+        return envelope
+    }
+
+    /// Gated on the envelope's `schema`, the one the contract defines; a payload's own copy
+    /// is for display.
+    func json<T: Decodable>(
+        _ type: T.Type, key: String, _ arguments: [String], timeout: TimeInterval = 30
+    ) throws -> T {
+        let envelope = try envelope(type, key: key, arguments, timeout: timeout)
+        guard Contract.supportedSchemas.contains(envelope.schema) else {
             throw RunError.incompatible(schema: envelope.schema)
         }
         guard let payload = envelope.payload else {
-            throw RunError.unparseable(result.stdout)
+            throw RunError.unparseable("no `\(key)` in the reply")
         }
         return payload
     }
@@ -99,8 +109,14 @@ struct CLIRunner {
         if let failure = envelope.failure { throw failure }
     }
 
-    func version(timeout: TimeInterval = 10) throws -> Contract.Version {
-        try json(Contract.Version.self, key: "version", ["version"], timeout: timeout)
+    /// For the probe only: no range check, and a nil payload rather than a throw, so a CLI
+    /// that re-typed `version` still reports the schema that explains why.
+    func probeVersion(timeout: TimeInterval) throws -> (schema: Int, version: Contract.Version?) {
+        let envelope = try envelope(Contract.Version.self, key: "version", ["version"],
+                                    timeout: timeout)
+        var version = envelope.payload
+        version?.schema = envelope.schema
+        return (envelope.schema, version)
     }
 
     func status() throws -> Contract.Status {

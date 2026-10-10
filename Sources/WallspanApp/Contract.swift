@@ -32,10 +32,22 @@ extension KeyedDecodingContainer where Key == AnyKey {
 /// Mirrors, not the CLI's own types: the app routinely parses a binary built from different
 /// source, so sharing definitions would make every rename a silent breakage.
 enum Contract {
-    /// The lowest CLI schema this build understands. Compared with `>=`, never `==`:
-    /// additive changes do not bump it, and refusing a newer CLI would strand the app on
-    /// the bundled copy forever.
+    /// The CLI schemas this build understands, inclusive. The floor stays put through
+    /// additive growth, which never bumps the integer; the ceiling refuses only a CLI that
+    /// announced a removed or re-typed field. Refusing costs nothing, because the bundled
+    /// copy ships from the same tree and make-app.sh asserts it is in range. Raise the
+    /// maximum only together with the mirrors below, never for a feature — that is what
+    /// `Version.supports` is for.
     static let minimumSchema = 1
+    static let maximumSchema = 1
+    static let supportedSchemas = minimumSchema...maximumSchema
+
+    /// `schema 1`, or `schemas 1–2` once the range opens.
+    static func describe(_ schemas: ClosedRange<Int>) -> String {
+        schemas.count == 1
+            ? "schema \(schemas.lowerBound)"
+            : "schemas \(schemas.lowerBound)–\(schemas.upperBound)"
+    }
 
     struct Failure: Decodable, Error, LocalizedError {
         /// A `String`, not an enum: an unrecognised code from a newer CLI must degrade to

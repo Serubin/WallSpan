@@ -87,6 +87,34 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# The bundled CLI is the fallback for a PATH CLI outside the app's schema range, so a bundle
+# whose own CLI is outside it would have nothing to fall back to.
+refuse_bundle() {
+    rm -rf "$APP"
+    echo "error: $1" >&2
+    echo "  A schema bump must raise Contract.maximumSchema (Sources/WallspanApp/Contract.swift)" >&2
+    echo "  and update the app's mirrors in the same change; see \"When the integer moves\" in" >&2
+    echo "  docs/cli-json-contract.md." >&2
+    exit 1
+}
+SUPPORTED="$("$APP/Contents/MacOS/Wallspan" --supported-schemas 2>/dev/null)" || SUPPORTED=""
+MIN_SCHEMA="" MAX_SCHEMA="" EXTRA=""
+read -r MIN_SCHEMA MAX_SCHEMA EXTRA <<<"$SUPPORTED" || true
+[ -z "$EXTRA" ] || MAX_SCHEMA=""
+CLI_SCHEMA="$("$APP/Contents/Helpers/wallspan" version --json 2>/dev/null \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["schema"])' 2>/dev/null)" \
+    || CLI_SCHEMA=""
+for value in "$MIN_SCHEMA" "$MAX_SCHEMA" "$CLI_SCHEMA"; do
+    case "$value" in
+        ''|*[!0-9]*) refuse_bundle "could not read the schemas (app '$SUPPORTED', CLI '$CLI_SCHEMA')" ;;
+    esac
+done
+if [ "$CLI_SCHEMA" -lt "$MIN_SCHEMA" ] || [ "$CLI_SCHEMA" -gt "$MAX_SCHEMA" ]; then
+    RANGE="schema ${MIN_SCHEMA}"
+    [ "$MIN_SCHEMA" -eq "$MAX_SCHEMA" ] || RANGE="schemas ${MIN_SCHEMA}–${MAX_SCHEMA}"
+    refuse_bundle "the bundled CLI speaks schema ${CLI_SCHEMA}; the app understands ${RANGE}"
+fi
+
 # --deep is deprecated for signing but still the simplest way to cover the nested helper;
 # the helper is signed first so the outer signature seals an already-signed tree.
 codesign --force --sign - --timestamp=none "$APP/Contents/Helpers/wallspan"

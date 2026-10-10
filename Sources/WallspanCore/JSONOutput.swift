@@ -10,7 +10,8 @@ import Foundation
 public enum JSONOutput {
     /// Bumped only for a breaking change — a removed or re-typed field. Adding a field or
     /// a new `code` is not breaking, because every caller is required to ignore what it
-    /// does not recognise. Callers accept `schema >= 1`, not `schema == 1`.
+    /// does not recognise. A bump raises the app's `Contract.maximumSchema` in the same
+    /// change, which make-app.sh enforces — see docs/cli-json-contract.md.
     public static let schema = 1
 
     /// Stable identifiers for failures a front-end must tell apart. `message` is for humans

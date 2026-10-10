@@ -79,6 +79,17 @@ expect_envelope version   version
 # come back fully populated on a machine with no display — so it is the one whose fields
 # are worth naming outright.
 expect_fields version "version" version channel commit schema commands
+# Callers gate on the envelope's schema and display the payload's, so the two cannot drift.
+if "$BIN" version --json 2>/dev/null | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+assert d["schema"] == d["version"]["schema"]
+' 2>/dev/null; then
+    echo "  ok        version --json  -> envelope and payload schema agree"
+else
+    echo "  FAIL      version --json  envelope and payload schema differ"
+    fails=$((fails + 1))
+fi
 expect_envelope layout    info
 expect_envelope layout    layout show
 expect_envelope sets      layout list

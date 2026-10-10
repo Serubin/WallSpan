@@ -37,7 +37,9 @@ subcommand with no defined payload rejects the flag rather than fall back to pro
 
 So a caller must:
 
-- accept `schema >= 1`, never `schema == 1`;
+- accept a range — from the lowest `schema` it was written against up to the highest it
+  has been updated for — never a single value, and pass over a binary outside it (see
+  [When the integer moves](#when-the-integer-moves));
 - ignore keys it does not recognise;
 - ignore `code` values it does not recognise, falling back to showing `message`.
 
@@ -52,6 +54,26 @@ on `channel` strands anyone running a snapshot, which is exactly the audience mo
 hearing from. `commit` is empty for a local build.
 
 Dates are ISO-8601 strings, not Foundation reference-date numbers.
+
+### When the integer moves
+
+A bump is rare and deliberate, and both sides have a job.
+
+**The CLI side.** The bump, the app's mirror types and the app's `Contract.maximumSchema`
+all change together, in one commit whose subject says so — commit subjects are the release
+notes. On-disk state whose meaning changes with the bump must be versioned or migrated,
+and an older reader must refuse it rather than misread it: the app's bundled CLI and a
+newer one on `PATH` can share the same files.
+
+**The caller side.** Gate on the **envelope's** `schema`, the one this contract defines.
+The copy inside `version`'s payload is for display: a bump may re-type that payload, and a
+caller that reads the schema from it would mistake a newer CLI for a broken one. A binary
+above the range is passed over, not failed on. The app falls through to the next
+candidate, which ends at the copy it bundles, and says so in About.
+
+Widening the range is never routine. Additive features are detected through `commands`,
+so a raised maximum means the app's mirrors were checked against the new shape, not that
+a feature arrived.
 
 ## Commands
 
@@ -164,13 +186,19 @@ Codes are stable; `message` is not — never parse it.
 `Scripts/check-json-contract.sh [binary]` asserts every supported command emits one
 parseable envelope and every unsupported one refuses the flag. It accepts an `error`
 envelope as a pass, because a machine with no attached display legitimately fails
-`layout show` — the shape is what is being checked.
+`layout show` — the shape is what is being checked. It also asserts that `version`'s
+payload repeats the envelope's `schema`, since one is gated on and the other displayed.
 
 The mutating commands run only after it has *confirmed* the support directory redirected
 into a scratch dir, by reading `config.configPath` back. `HOME` alone does not redirect it:
 `NSSearchPathForDirectoriesInDomains` reads the passwd entry, so `CFFIXED_USER_HOME` is
 what Foundation honours. Getting that wrong rewrites the invoking user's real settings and
 wallpaper, which is why the check verifies rather than assumes.
+
+`Scripts/make-app.sh` refuses to produce a bundle whose own CLI is outside the app's range:
+it compares the helper's envelope `schema` with `Wallspan --supported-schemas` and deletes
+the bundle on a mismatch. A bump that forgets `Contract.maximumSchema` fails the build
+rather than shipping an app that would pass over its own fallback.
 
 ## Example
 
