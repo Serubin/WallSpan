@@ -21,7 +21,13 @@ enum BinaryResolver {
         /// Set only for a CLI passed over for speaking a newer schema, which About explains
         /// rather than lists: nothing is wrong with it, this app is just behind.
         let newer: (schema: Int, version: String?)?
+
+        /// Something else that happens to be called `wallspan`, or a CLI predating the
+        /// contract: either way, not one this app can drive.
+        var notWallspan: Bool { reason == BinaryResolver.noAnswer }
     }
+
+    static let noAnswer = "did not answer `version --json`"
 
     struct Resolution {
         let runner: CLIRunner
@@ -54,19 +60,48 @@ enum BinaryResolver {
         return FileManager.default.isExecutableFile(atPath: sibling.path) ? sibling : nil
     }
 
+    enum ShellAnswer {
+        case found(URL)
+        case absent
+        /// No shell, or it timed out: says nothing about whether `wallspan` is on PATH.
+        case failed
+    }
+
     /// Asks the login shell, because an app launched from Finder inherits launchd's
     /// minimal PATH — Homebrew and `~/.local/bin` are invisible to it. Timed out, since
     /// `-l` sources rc files that can block.
-    static func fromLoginShell(timeout: TimeInterval = 3) -> URL? {
+    static func askLoginShell(timeout: TimeInterval = 3) -> ShellAnswer {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
+        guard FileManager.default.isExecutableFile(atPath: shell) else { return .failed }
         guard let result = try? CLIRunner.capture(
             URL(fileURLWithPath: shell), ["-lc", "command -v wallspan"], timeout: timeout
-        ), result.status == 0 else { return nil }
+        ) else { return .failed }
+        guard result.status == 0 else { return .absent }
 
         let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty, path.hasPrefix("/") else { return nil }
-        return URL(fileURLWithPath: path)
+        guard !path.isEmpty, path.hasPrefix("/") else { return .absent }
+        return .found(URL(fileURLWithPath: path))
+    }
+
+    static func fromLoginShell(timeout: TimeInterval = 3) -> URL? {
+        guard case .found(let url) = askLoginShell(timeout: timeout) else { return nil }
+        return url
+    }
+
+    /// Everywhere a `wallspan` reached by name could be, in the order a lookup trusts
+    /// them, each path once.
+    static func namedCandidates(shellHit: URL?,
+                                directories: [URL] = wellKnownDirectories) -> [(URL, Source)] {
+        var candidates: [(URL, Source)] = []
+        if let shellHit { candidates.append((shellHit, .path)) }
+        for dir in directories {
+            let candidate = dir.appendingPathComponent("wallspan")
+            // Skip the duplicate rather than probing the same binary twice.
+            if !candidates.contains(where: { $0.0.standardizedFileURL == candidate.standardizedFileURL }) {
+                candidates.append((candidate, .wellKnown))
+            }
+        }
+        return candidates
     }
 
     enum Probe {
@@ -85,7 +120,7 @@ enum BinaryResolver {
         if schema < supported.lowerBound {
             return .unusable("schema \(schema), this app needs \(supported.lowerBound) or newer")
         }
-        guard let version else { return .unusable("did not answer `version --json`") }
+        guard let version else { return .unusable(noAnswer) }
         return .usable(version)
     }
 
@@ -97,7 +132,7 @@ enum BinaryResolver {
             return .unusable("not executable")
         }
         guard let answer = try? CLIRunner(binary: url).probeVersion(timeout: 5) else {
-            return .unusable("did not answer `version --json`")
+            return .unusable(noAnswer)
         }
         return classify(schema: answer.schema, version: answer.version)
     }
@@ -105,17 +140,7 @@ enum BinaryResolver {
     static func resolve(preferBundled: Bool = false) -> Resolution? {
         var rejected: [Rejection] = []
 
-        var candidates: [(URL, Source)] = []
-        if !preferBundled {
-            if let shellPath = fromLoginShell() { candidates.append((shellPath, .path)) }
-            for dir in wellKnownDirectories {
-                let candidate = dir.appendingPathComponent("wallspan")
-                // Skip the duplicate rather than probing the same binary twice.
-                if !candidates.contains(where: { $0.0.standardizedFileURL == candidate.standardizedFileURL }) {
-                    candidates.append((candidate, .wellKnown))
-                }
-            }
-        }
+        var candidates = preferBundled ? [] : namedCandidates(shellHit: fromLoginShell())
         if let bundled = bundledBinary { candidates.append((bundled, .bundled)) }
 
         for (url, source) in candidates {

@@ -41,6 +41,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// Faster polling only while the menu is open — the countdown is visible then, and
     /// invisible the rest of the time.
     private var menuIsOpen = false
+    /// Menu open stats the runner, and must not queue a second resolve behind the first.
+    private var resolveInFlight = false
+
+    /// Read once: every rebuild consults it, and rebuilds touch no files.
+    private let bundled = BinaryResolver.bundledBinary
+    /// The `wallspan` a terminal would run. Not the one `resolution` runs, which changes
+    /// only when asked to.
+    private var installed: CommandLineTool.Installed?
+    /// Found off the main thread with `installed`, since it resolves symlinks.
+    private var installedUnusedReason: String?
+    private var didDetect = false
+    /// Kept when a later ask times out, so the CLI item does not flap to Install.
+    private var lastShellHit: URL?
+    private var lastShellAt: Date?
+    private var detectInFlight = false
+    /// A detection asked for mid-flight, and whether it must ask the shell.
+    private var detectAgain: Bool?
+    /// Not `queue`: a login shell stuck on an rc file must not hold up the status refresh.
+    private let detectQueue = DispatchQueue(label: "net.serubin.wallspan.detect", qos: .utility)
 
     private static let intervals: [(String, String)] = [
         ("5 minutes", "5m"), ("15 minutes", "15m"), ("30 minutes", "30m"),
@@ -64,6 +83,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // MARK: - talking to the CLI
 
     private func resolveBinary() {
+        resolveInFlight = true
         queue.async { [weak self] in
             let resolved = BinaryResolver.resolve(
                 preferBundled: UserDefaults.standard.bool(forKey: "PreferBundledCLI")
@@ -85,12 +105,63 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
             DispatchQueue.main.async {
                 self?.didResolve = true
+                self?.resolveInFlight = false
                 self?.resolution = resolved
                 // Before refresh(), which returns early when nothing resolved.
                 self?.updateButton()
                 self?.updateAbout()
                 self?.refresh()
                 self?.armUpdateChecks()
+                self?.detectInstalled(force: true)
+            }
+        }
+    }
+
+    /// Re-run on every menu open, so a CLI installed or removed since shows; the login
+    /// shell, the slow part, at most every 10 s.
+    private func detectInstalled(force: Bool) {
+        guard !detectInFlight else {
+            detectAgain = force || detectAgain == true
+            return
+        }
+        let preferBundled = UserDefaults.standard.bool(forKey: "PreferBundledCLI")
+        // Stat-only under PreferBundledCLI, which promises the app stops consulting PATH.
+        let askShell = !preferBundled
+            && (force || lastShellAt.map { Date().timeIntervalSince($0) >= 10 } ?? true)
+        if askShell { lastShellAt = Date() }
+        detectInFlight = true
+
+        let cached = preferBundled ? nil : lastShellHit
+        let resolution = self.resolution
+        let bundled = self.bundled
+        detectQueue.async { [weak self] in
+            var hit = cached
+            if askShell {
+                switch BinaryResolver.askLoginShell() {
+                case .found(let url): hit = url
+                case .absent: hit = nil
+                case .failed: break
+                }
+            }
+            let installed = CommandLineTool.detect(
+                shellHit: hit, resolution: resolution, bundled: bundled
+            )
+            let unusedReason = resolution.flatMap {
+                installed?.unusedReason(resolution: $0, preferBundled: preferBundled)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if askShell { lastShellHit = hit }
+                self.installed = installed
+                installedUnusedReason = unusedReason
+                didDetect = true
+                detectInFlight = false
+                if let again = detectAgain {
+                    detectAgain = nil
+                    detectInstalled(force: again)
+                } else if menuIsOpen {
+                    rebuild()
+                }
             }
         }
     }
@@ -210,6 +281,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
+        // Only a runner that has gone is replaced here. One merely outranked waits for Look
+        // Again, so what the app runs never changes behind someone's back.
+        if let url = resolution?.url, !resolveInFlight,
+           !FileManager.default.isExecutableFile(atPath: url.path) {
+            resolveBinary()
+        }
+        detectInstalled(force: false)
         rebuild()
         refresh()
         scheduleRefresh(every: 2)
@@ -322,10 +400,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let resolution, let agent, agent.loaded, agent.programExists,
               let program = agent.program
         else { return }
-        let programURL = URL(fileURLWithPath: program).standardizedFileURL
-        guard programURL != resolution.url.standardizedFileURL,
+        // Through links: `Install CLI…`'s link and the bundled copy it points at are one binary.
+        let programURL = URL(fileURLWithPath: program)
+        guard !CommandLineTool.sameBinary(programURL, resolution.url),
               // Off a CLI this app passed over as newer, a switch would be a downgrade.
-              !resolution.newer.contains(where: { $0.url.standardizedFileURL == programURL })
+              !resolution.newer.contains(where: { CommandLineTool.sameBinary($0.url, programURL) })
         else { return }
 
         let item = item("Switch Background Cycling to This Copy", #selector(switchAgentBinary))
@@ -385,30 +464,71 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         calibration.prepareForTermination()
     }
 
-    /// Offered only when there is nothing to reach `wallspan` by. A CLI already resolved
-    /// from PATH or a standard location — Homebrew's formula, say — is the thing this item
-    /// would install, and linking a second copy over it would only be a way to end up
-    /// running the wrong one.
+    /// Offered only when nothing answers to `wallspan` by name: a second link over Homebrew's
+    /// formula, say, would only be a way to end up running the wrong one.
     private func addCommandLineToolItem() {
-        guard let bundled = BinaryResolver.bundledBinary else { return }
-
-        let installed: String?
-        switch CommandLineTool.state(bundled: bundled) {
-        case .installed:
-            installed = CommandLineTool.destination.path
-        case .notInstalled, .occupiedBy:
-            // Resolved from anywhere but the bundle means `wallspan` already answers by
-            // name, whoever put it there.
-            installed = resolution.flatMap { $0.source == .bundled ? nil : $0.url.path }
-        }
-
-        guard let path = installed else {
+        // Hidden until the first detection lands, rather than offering Install for a beat.
+        guard bundled != nil, didDetect else { return }
+        guard let installed else {
             menu.addItem(item("Install CLI…", #selector(installCommandLineTool)))
             return
         }
-        let entry = disabled("CLI Installed")
-        entry.toolTip = "wallspan is already installed at \(path)"
+
+        let title: String
+        if installed.notWallspan {
+            title = installed.pathStatus == .notOnPath
+                ? "Another wallspan Is Installed" : "Another wallspan Is on PATH"
+        } else {
+            switch installed.origin {
+            case .homebrewFormula, .homebrewCask: title = "CLI Installed by Homebrew"
+            case .otherWallspanApp: title = "CLI Linked to Another Wallspan"
+            case .linkedByInstallCLI, .linkedToThisApp, .elsewhere: title = "CLI Installed"
+            }
+        }
+        let entry = disabled(title)
+        entry.toolTip = commandLineToolTip(installed).joined(separator: "\n")
         menu.addItem(entry)
+
+        // The tooltip names Look Again, which is otherwise only in the nothing-found menu.
+        if installedUnusedReason == CommandLineTool.Installed.foundSinceLaunch {
+            let again = item("Look Again", #selector(lookAgain))
+            again.toolTip = "Choose again which wallspan this app runs."
+            menu.addItem(again)
+        }
+    }
+
+    private func commandLineToolTip(_ installed: CommandLineTool.Installed) -> [String] {
+        let preferBundled = UserDefaults.standard.bool(forKey: "PreferBundledCLI")
+        var lines = [installed.url.path]
+        switch installed.origin {
+        case .linkedByInstallCLI:
+            lines.append("Linked by Wallspan, so it updates with the app.")
+        case .linkedToThisApp:
+            lines.append("Linked to this copy of Wallspan, so it updates with the app.")
+        case .homebrewFormula:
+            lines.append("Installed by Homebrew's formula. `brew upgrade wallspan` updates it.")
+        case .homebrewCask:
+            lines.append("Linked by Homebrew's cask, so it updates with the cask's app.")
+        case .otherWallspanApp(let app):
+            lines.append("Linked to \(app.path), so it updates with that copy, not this one.")
+        case .elsewhere:
+            lines.append("Installed outside Wallspan, so Wallspan will not replace it.")
+        }
+        // The login shell is not asked under PreferBundledCLI, so there is nothing to say.
+        if !preferBundled {
+            switch installed.pathStatus {
+            case .first:
+                lines.append("A terminal runs this one.")
+            case .shadowedBy(let other):
+                lines.append("A terminal runs \(other.path) before it.")
+            case .notOnPath:
+                lines.append("Not on your PATH, so a terminal will not find it by name.")
+            }
+        }
+        if let resolution, let reason = installedUnusedReason {
+            lines.append("This app runs \(resolution.url.path) instead: \(reason).")
+        }
+        return lines
     }
 
     private func addHeader() {
@@ -599,8 +719,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func installCommandLineTool() {
-        guard let bundled = BinaryResolver.bundledBinary else { return }
+        guard let bundled else { return }
         NSApp.activate(ignoringOtherApps: true)
+
+        // Detection can be 10 s stale, and a `brew install` inside that window must win.
+        let preferBundled = UserDefaults.standard.bool(forKey: "PreferBundledCLI")
+        if let existing = CommandLineTool.installedElsewhere(
+            shellHit: preferBundled ? nil : lastShellHit) {
+            inform("wallspan is already installed at \(existing.path)",
+                   "A second link would only be a way to run the wrong one.")
+            detectInstalled(force: true)
+            return
+        }
 
         var replacing = false
         if case .occupiedBy(let existing) = CommandLineTool.state(bundled: bundled) {
@@ -626,7 +756,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             : "Linked into \(CommandLineTool.destinationDirectory.path), which is not on "
               + "your PATH yet. Add it to your shell profile to use `wallspan` by name."
         alert.runModal()
-        rebuild()
+        resolveBinary()
     }
 
     @objc private func openAbout() { showAbout() }
