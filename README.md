@@ -234,6 +234,7 @@ computes which source pixel should be there, and compares. Real photographs come
 ```sh
 swift build -c release
 ./.build/release/wallspan info
+swift test                     # the menu bar app's unit tests (XCTest needs Xcode)
 ```
 
 Needs only the Swift toolchain from Command Line Tools — no Xcode, no code signing.

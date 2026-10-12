@@ -1,8 +1,8 @@
 name: Build and package
 description: >
-  Stamps the version, builds the universal CLI and Wallspan.app, verifies both, and
-  packages the release assets. Shared by CI and the release workflow so the artifacts a
-  release ships are produced by exactly the steps that gated every PR.
+  Stamps the version, runs the unit tests, builds the universal CLI and Wallspan.app,
+  verifies both, and packages the release assets. Shared by CI and the release workflow so
+  the artifacts a release ships are produced by exactly the steps that gated every PR.
 
 inputs:
   channel:
@@ -65,6 +65,11 @@ runs:
         if [ -n "$VERSION" ]; then ARGS+=(--version "$VERSION"); fi
         if [ -n "$PR" ]; then ARGS+=(--pr "$PR"); fi
         Scripts/version.sh "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Unit tests
+      shell: bash
+      # Debug and host-arch only: these cover the app's logic, not the universal link.
+      run: swift test
 
     - name: Build universal
       shell: bash
