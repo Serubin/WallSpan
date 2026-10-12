@@ -25,22 +25,46 @@ enum InstallSource {
     /// The two prefixes a Finder-launched app can find. An exotic `HOMEBREW_PREFIX` is
     /// invisible here — launchd gives the app no shell environment — so it reads as
     /// `.other` and gets the release page, which is wrong but harmless.
-    private static let brewPrefixes = ["/opt/homebrew", "/usr/local"]
+    static let brewPrefixes = ["/opt/homebrew", "/usr/local"]
 
-    private static var ownBundle: URL {
+    static var ownBundle: URL {
         Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL
     }
 
     /// Resolved in full rather than one hop: Homebrew's link is relative
     /// (`../Cellar/wallspan/0.1.0/bin/wallspan`), and `Install CLI…` adds a second hop.
-    static func cli(_ url: URL) -> InstallSource {
+    static func cli(_ url: URL, ownBundle: URL = InstallSource.ownBundle,
+                    brewPrefixes: [String] = InstallSource.brewPrefixes) -> InstallSource {
         let resolved = url.resolvingSymlinksInPath().standardizedFileURL
         if resolved.path.hasPrefix(ownBundle.path + "/") { return .bundledWithApp }
+        if isCaskLink(url, brewPrefixes: brewPrefixes) { return .homebrewCask }
 
         let parts = resolved.pathComponents
         if let cellar = parts.firstIndex(of: "Cellar"), parts.count > cellar + 1,
            parts[cellar + 1] == "wallspan" { return .homebrewFormula }
         return .other
+    }
+
+    /// Judged by where the link sits and one hop of where it points, not by the running
+    /// bundle: the cask links into the Wallspan.app it installed, which need not be this one.
+    static func isCaskLink(_ url: URL,
+                           brewPrefixes: [String] = InstallSource.brewPrefixes) -> Bool {
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        guard let prefix = brewPrefixes.map({ URL(fileURLWithPath: $0) }).first(where: {
+                  $0.appendingPathComponent("bin").standardizedFileURL.path
+                      == directory.standardizedFileURL.path
+              }),
+              let hop = try? fm.destinationOfSymbolicLink(atPath: url.path)
+        else { return false }
+
+        let room = prefix.appendingPathComponent("Caskroom/wallspan").standardizedFileURL
+        let target = URL(fileURLWithPath: hop, relativeTo: directory).standardizedFileURL
+        if target.path.hasPrefix(room.path + "/") { return true }
+        var isDirectory: ObjCBool = false
+        return target.path.hasSuffix("/Wallspan.app/Contents/Helpers/wallspan")
+            && fm.fileExists(atPath: room.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
     }
 
     /// A Caskroom entry proves a cask is installed, not that it is the bundle now running —

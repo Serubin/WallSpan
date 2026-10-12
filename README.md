@@ -72,6 +72,8 @@ contract change this app predates is passed over for the bundled copy until the 
 catches up. **About Wallspan** shows which one is in use, which candidates were passed
 over and why, and opens `~/Library/Logs/wallspan.log`;
 `defaults write net.serubin.wallspan.app PreferBundledCLI -bool true` pins it to the bundle.
+The menu still recognises a CLI installed elsewhere, without running it or asking your
+shell, and says the app is using the bundled copy instead.
 
 The contract between them is [documented](docs/cli-json-contract.md) and versioned, so the
 two can be released independently.
@@ -86,9 +88,15 @@ Downloads, say — the app repairs it on the next launch. If it points at a diff
 working copy, the app leaves it alone and offers to switch instead.
 
 **Install CLI…** symlinks the bundled CLI into `~/.local/bin`, so `wallspan` works in a
-terminal too. A symlink rather than a copy, so it tracks the app. It reads **CLI
-Installed** instead, disabled, when a `wallspan` already answers by name — the Homebrew
-formula, say — since a second link would only be a way to run the wrong one.
+terminal too. A symlink rather than a copy, so it tracks the app. It is offered only when
+no `wallspan` answers by name: otherwise the entry is disabled and says who put that one
+there — **CLI Installed by Homebrew** for the formula or the cask, **CLI Linked to Another
+Wallspan** for a link into a different copy of the app, **Another wallspan Is on PATH**
+for something else by that name — since a second link would only be a way to run the
+wrong one. Hover it for the path, whether a terminal finds it first, and why the app runs
+a different copy if it does. It is re-checked each time the menu opens, so a CLI installed
+or removed meanwhile shows up; the app switches to it only on **Look Again** or the next
+launch.
 
 ### Calibrating from the app
 
