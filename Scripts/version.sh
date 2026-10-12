@@ -6,12 +6,12 @@
 # disagree you get a download whose name promises one build and whose `version` reports
 # another.
 #
-#   release   0.2.0
+#   release   0.2.0                         --version, chosen when the release is dispatched
 #   beta      0.2.0-beta.3, 0.2.0-rc.1      a signed prerelease
 #   unsigned  0.2.0-unsigned.1              an ad-hoc prerelease, never offered as an update
-#   snapshot  0.2.0-snapshot.7+g1a2b3c4     7 = commits since the last stable v* tag
-#   dev       0.2.0-dev.pr42+g1a2b3c4
-#   local     0.1.0                         an unstamped working tree
+#   snapshot  0.2.1-snapshot.7+g1a2b3c4     after v0.2.0; 7 = commits since that tag
+#   dev       0.2.1-dev.pr42+g1a2b3c4
+#   local     0.0.0-local                   an unstamped working tree
 #
 # usage: Scripts/version.sh --channel release|beta|unsigned|snapshot|dev|local
 #                           [--version VERSION] [--pr N] [--sha REF] [--stamp]
@@ -41,12 +41,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-VERSION_SWIFT=Sources/WallspanCore/Version.swift
 BUILDINFO_SWIFT=Sources/WallspanCore/BuildInfo.swift
 
-# The one hand-edited constant. Everything below is derived from it.
-BASE="$(sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p' "$VERSION_SWIFT")"
-[ -n "$BASE" ] || die "could not read baseVersion from $VERSION_SWIFT"
+# No leading zeros, and at most six digits, so bash arithmetic can neither misread nor wrap.
+NUM='(0|[1-9][0-9]{0,5})'
+CORE_RE="$NUM\.$NUM\.$NUM"
+
+# Zero-padded, so two versions compare as strings exactly as they do as numbers.
+pad() {
+    [[ "$1" =~ ^$CORE_RE$ ]]
+    printf '%06d%06d%06d' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
 
 SHA="$(git rev-parse "$REF")"
 SHORT="$(git rev-parse --short=7 "$SHA")"
@@ -54,44 +59,73 @@ SHORT="$(git rev-parse --short=7 "$SHA")"
 # count that resets at each tag would go backwards.
 TOTAL="$(git rev-list --count "$SHA")"
 
-# --match skips the backup/*, spr-backup/* and squashed/* tags; --exclude skips betas,
-# whose tags would reset the count and send snapshot numbers backwards.
-LAST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' "$SHA" \
-    2>/dev/null || true)"
-if [ -n "$LAST_TAG" ]; then
-    SINCE="$(git rev-list --count "$LAST_TAG..$SHA")"
+# The highest stable and prerelease versions on this line. Only exact vX.Y.Z counts as
+# stable: a beta would reset the count below, and backup/* or a stray v2.0 is no release.
+STABLE=""
+PRERELEASE=""
+# Assigned first, so a failed listing stops the script instead of reading as "no tags".
+TAGS="$(git tag --merged "$SHA" --list 'v*')"
+while IFS= read -r tag; do
+    if [[ "$tag" =~ ^v($CORE_RE)$ ]]; then
+        core="${BASH_REMATCH[1]}"
+        if [ -z "$STABLE" ] || [[ "$(pad "$core")" > "$(pad "$STABLE")" ]]; then
+            STABLE="$core"
+        fi
+    elif [[ "$tag" =~ ^v($CORE_RE)-(beta|rc|unsigned)\.[1-9][0-9]*$ ]]; then
+        core="${BASH_REMATCH[1]}"
+        if [ -z "$PRERELEASE" ] || [[ "$(pad "$core")" > "$(pad "$PRERELEASE")" ]]; then
+            PRERELEASE="$core"
+        fi
+    fi
+done <<<"$TAGS"
+if [ -n "$STABLE" ]; then
+    SINCE="$(git rev-list --count "v$STABLE..$SHA")"
 else
     SINCE="$TOTAL"
 fi
 
+unreleased_base() {
+    # Without history the tags above are missing, and the base would silently fall to 0.0.1.
+    [ "$(git rev-parse --is-shallow-repository)" = false ] \
+        || die "--channel $CHANNEL needs full history and tags; fetch with fetch-depth: 0"
+    local base=0.0.1
+    if [ -n "$STABLE" ]; then
+        [[ "$STABLE" =~ ^$CORE_RE$ ]]
+        base="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+    fi
+    # A later version that already has a prerelease here: the build has to sort above it.
+    if [ -n "$PRERELEASE" ] && [[ "$(pad "$PRERELEASE")" > "$(pad "$base")" ]]; then
+        base="$PRERELEASE"
+    fi
+    echo "$base"
+}
+
 case "$CHANNEL" in
     release)
-        FULL="${VERSION:-$BASE}"
-        [ "$FULL" = "$BASE" ] || die "a release must be exactly baseVersion $BASE, not $FULL"
+        [[ "$VERSION" =~ ^$CORE_RE$ ]] || die "--channel release needs --version X.Y.Z"
+        FULL="$VERSION"
         ;;
     beta)
-        [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(beta|rc)\.[1-9][0-9]*$ ]] \
+        [[ "$VERSION" =~ ^$CORE_RE-(beta|rc)\.[1-9][0-9]*$ ]] \
             || die "--channel beta needs --version X.Y.Z-beta.N or X.Y.Z-rc.N"
-        [ "${BASH_REMATCH[1]}" = "$BASE" ] || die "$VERSION is not a prerelease of $BASE"
         FULL="$VERSION"
         ;;
     unsigned)
-        [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-unsigned\.[1-9][0-9]*$ ]] \
+        [[ "$VERSION" =~ ^$CORE_RE-unsigned\.[1-9][0-9]*$ ]] \
             || die "--channel unsigned needs --version X.Y.Z-unsigned.N"
-        [ "${BASH_REMATCH[1]}" = "$BASE" ] || die "$VERSION is not a prerelease of $BASE"
         FULL="$VERSION"
         ;;
     snapshot)
-        FULL="$BASE-snapshot.$SINCE+g$SHORT"
+        FULL="$(unreleased_base)-snapshot.$SINCE+g$SHORT"
         ;;
     dev)
         [ -n "$PR" ] || die "--channel dev needs --pr N"
-        FULL="$BASE-dev.pr$PR+g$SHORT"
+        FULL="$(unreleased_base)-dev.pr$PR+g$SHORT"
         ;;
     local)
         # Deliberately identical to the checked-in BuildInfo.swift, so `--channel local
         # --stamp` is how you undo a stamp.
-        FULL="$BASE"
+        FULL="0.0.0-local"
         SHORT=""
         ;;
     "") die "--channel is required" ;;
@@ -111,7 +145,6 @@ version=$FULL
 slug=$SLUG
 channel=$CHANNEL
 commit=$SHORT
-base=$BASE
 bundle_version=$CORE.$TOTAL
 sha=$SHA
 OUT
@@ -119,19 +152,18 @@ OUT
 [ "$STAMP" -eq 1 ] || exit 0
 
 STAMPED="$FULL"
-# An unstamped tree reports baseVersion through the fallback in Version.swift; leaving the
-# constant empty is what makes `local` round-trip back to the checked-in file exactly.
+# An unstamped tree reports fallbackVersion from Version.swift; leaving the constant empty
+# is what makes `local` round-trip back to the checked-in file exactly.
 [ "$CHANNEL" = local ] && STAMPED=""
 
 cat > "$BUILDINFO_SWIFT" <<STAMPED_FILE
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Solomon <serubin@serubin.net>
 
-// Overwritten in place by \`Scripts/version.sh --stamp\`; the values below are what an
-// unstamped working tree reports. Checked in rather than generated so that a bare
-// \`swift build\` still compiles — hand-edit \`baseVersion\` in Version.swift, not this file.
+// Rewritten in place by \`Scripts/version.sh --stamp\`, never by hand; checked in with an
+// unstamped tree's values so that a bare \`swift build\` still compiles.
 extension Wallspan {
-    /// Empty in a working tree, so \`version\` falls back to \`baseVersion\`.
+    /// Empty in a working tree, so \`version\` falls back to \`fallbackVersion\`.
     static let stampedVersion = "$STAMPED"
 
     /// How this build was produced: \`release\`, \`beta\`, \`unsigned\`, \`snapshot\`, \`dev\`, or

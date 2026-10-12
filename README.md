@@ -260,10 +260,13 @@ commit. `wallspan version` prints it.
 | `release` | `0.2.0` | a tagged release, on the [releases page](../../releases) | Developer ID, notarised |
 | `beta` | `0.2.0-beta.3`, `0.2.0-rc.1` | a prerelease on the releases page, and `wallspan@beta` in the tap | Developer ID, notarised |
 | `unsigned` | `0.2.0-unsigned.1` | a prerelease for testing the release workflow | ad-hoc |
-| `snapshot` | `0.2.0-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact | ad-hoc |
-| `dev` | `0.2.0-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact | ad-hoc |
+| `snapshot` | `0.2.1-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact | ad-hoc |
+| `dev` | `0.2.1-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact | ad-hoc |
 
-A plain `swift build` reports the bare version and channel `local`.
+A snapshot or dev build counts as a prerelease of the next patch after the last stable
+release, or of a later version that already has a prerelease, so a snapshot sorts above
+the release and that version's betas and rcs, and a dev build above its betas.
+A plain `swift build` reports `0.0.0-local` and channel `local`.
 
 A release ships four assets: the CLI as a tarball, the same CLI as a bare binary, the
 `Wallspan.app` bundle, and `SHA256SUMS.txt` to check them with. The CLI and the app are
@@ -281,10 +284,24 @@ published. Signing happens in a separate job that waits for approval in the `rel
 environment, which holds the certificate and the notary key, and fails with the exact
 `gh secret set` command for anything missing.
 
-Betas are signed and notarised exactly like releases. Pass `beta` or `rc` as the version
-and the workflow picks the next number, counting drafts; it refuses a beta once an `rc` of
-the same version exists, and any prerelease once that version has shipped. To follow betas
-with Homebrew, install the beta cask instead of the stable one:
+The version is chosen when the workflow is dispatched; nothing in the source names it.
+Give it `X.Y.Z` and a `kind`: `release` tags `X.Y.Z` itself, while `beta`, `rc` and
+`unsigned` add the next `-beta.N`, `-rc.N` or `-unsigned.N`, counting drafts.
+
+```sh
+gh workflow run release.yml -f version=1.1.0 -f kind=beta      # 1.1.0-beta.1, then .2, ...
+gh workflow run release.yml -f version=1.1.0 -f kind=release   # 1.1.0
+```
+
+It refuses a version that already exists or is not newer than the latest release, a beta
+once an `rc` of the same version exists, and anything past the next patch, minor or major
+unless that version already has a prerelease or `allow_jump` is set: once published, the
+tap never moves backwards, so a typo would strand it. A ref from before this scheme can
+only be released at the `baseVersion` in its own `Version.swift`; anything else fails in
+the build job.
+
+Betas are signed and notarised exactly like releases. To follow betas with Homebrew,
+install the beta cask instead of the stable one:
 
 ```sh
 brew uninstall --cask wallspan

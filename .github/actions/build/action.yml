@@ -73,7 +73,7 @@ runs:
 
     - name: Release script tests
       shell: bash
-      run: Scripts/test-next-prerelease.sh
+      run: Scripts/test-resolve-version.sh
 
     - name: Build Wallspan.app
       id: app

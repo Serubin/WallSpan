@@ -11,16 +11,15 @@ on:
         required: true
         default: main
       version:
-        description: >-
-          X.Y.Z, X.Y.Z-beta.N, X.Y.Z-rc.N or X.Y.Z-unsigned.N, without the leading v; or
-          `beta` or `rc` for the next number of that kind
+        description: X.Y.Z, without the leading v; a prerelease gets its -beta.N, -rc.N or -unsigned.N added
         required: true
-      prerelease:
-        description: Mark the release as a prerelease (required for, and only for, a suffix)
-        type: boolean
-        default: false
-      unsigned:
-        description: Skip Developer ID signing (required for, and only for, -unsigned.N)
+      kind:
+        description: release, or a signed beta or rc, or an ad-hoc unsigned prerelease
+        type: choice
+        options: [beta, rc, release, unsigned]
+        default: beta
+      allow_jump:
+        description: Allow a version past the next patch, minor or major of the latest release
         type: boolean
         default: false
       allow_unmerged:
@@ -61,25 +60,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           REF: ${{ inputs.ref }}
-          VERSION: ${{ inputs.version }}
-          PRERELEASE: ${{ inputs.prerelease }}
-          UNSIGNED: ${{ inputs.unsigned }}
+          BASE: ${{ inputs.version }}
+          KIND: ${{ inputs.kind }}
+          ALLOW_JUMP: ${{ inputs.allow_jump }}
           ALLOW_UNMERGED: ${{ inputs.allow_unmerged }}
         run: |
           set -euo pipefail
 
           # [[ =~ ]], not grep: grep matches line by line, so a second line would ride along.
-          GRAMMAR='^[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc|unsigned)\.[1-9][0-9]*)?$'
-          case "$VERSION" in
+          NUM='(0|[1-9][0-9]{0,5})'
+          GRAMMAR="^$NUM\.$NUM\.$NUM(-(beta|rc|unsigned)\.[1-9][0-9]*)?$"
+          case "$BASE" in
             v*) echo "::error::drop the leading v: pass the version without it"; exit 1 ;;
-            beta|rc) ;;
-            *)
-              if ! [[ "$VERSION" =~ $GRAMMAR ]]; then
-                echo "::error::the version input is not X.Y.Z, X.Y.Z-beta.N, X.Y.Z-rc.N, X.Y.Z-unsigned.N, beta or rc"
-                exit 1
-              fi
-              ;;
+            *-*) echo "::error::pass X.Y.Z alone; the kind input adds -beta.N, -rc.N or -unsigned.N"; exit 1 ;;
           esac
+          if ! [[ "$BASE" =~ ^$NUM\.$NUM\.$NUM$ ]]; then
+            echo "::error::the version input is not X.Y.Z, without leading zeros"
+            exit 1
+          fi
 
           # A leading `-` would reach git as an option.
           if ! [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/@+-]*$ ]]; then
@@ -96,49 +94,25 @@ jobs:
           git fetch --no-tags origin "$REF"
           SHA="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
 
-          # The tree has to already claim the version it is being tagged as. This is what
-          # keeps the post-release bump of baseVersion from being forgotten.
-          BASE="$(git show "$SHA:Sources/WallspanCore/Version.swift" \
-            | sed -n 's/.*baseVersion = "\([^"]*\)".*/\1/p')"
-          if ! [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version.swift at $SHA has no single X.Y.Z baseVersion"
-            exit 1
-          fi
-
           # This workflow's copy of the script, never the ref's: this job holds contents:write.
-          case "$VERSION" in
-            beta|rc) VERSION="$(Scripts/next-prerelease.sh --kind "$VERSION" --base "$BASE")" ;;
-            *-beta.*|*-rc.*) Scripts/next-prerelease.sh --check "$VERSION" > /dev/null ;;
-          esac
-          # Again on the result, since it was built partly from the untrusted ref.
-          if ! [[ "$VERSION" =~ $GRAMMAR ]]; then
-            echo "::error::resolved a version that is not in the grammar"
+          # It refuses an existing version, one not newer than the latest stable, and a jump.
+          ARGS=(--kind "$KIND" --base "$BASE")
+          if [ "$ALLOW_JUMP" = true ]; then ARGS+=(--allow-jump); fi
+          VERSION="$(Scripts/resolve-version.sh "${ARGS[@]}")"
+          # Again on the result, which was built from tag names anyone with push access sets.
+          if ! [[ "$VERSION" =~ $GRAMMAR ]] || [ "${VERSION%%-*}" != "$BASE" ]; then
+            echo "::error::resolved $VERSION, which is not a version of $BASE"
             exit 1
           fi
           TAG="v$VERSION"
-          CORE="${VERSION%%-*}"
-          if [ "$BASE" != "$CORE" ]; then
-            echo "::error::Version.swift says baseVersion $BASE, but this would tag $CORE"
-            exit 1
-          fi
 
-          case "$VERSION" in
-            *-unsigned.*) CHANNEL=unsigned ;;
-            *-*) CHANNEL=beta ;;
-            *) CHANNEL=release ;;
+          case "$KIND" in
+            release) CHANNEL=release ;;
+            unsigned) CHANNEL=unsigned ;;
+            *) CHANNEL=beta ;;
           esac
           SUFFIXED=false
           if [ "$CHANNEL" != release ]; then SUFFIXED=true; fi
-          if [ "$PRERELEASE" != "$SUFFIXED" ]; then
-            echo "::error::$VERSION needs prerelease=$SUFFIXED: it is set exactly when the version has a suffix"
-            exit 1
-          fi
-          IS_UNSIGNED=false
-          if [ "$CHANNEL" = unsigned ]; then IS_UNSIGNED=true; fi
-          if [ "$UNSIGNED" != "$IS_UNSIGNED" ]; then
-            echo "::error::$VERSION needs unsigned=$IS_UNSIGNED: only an -unsigned.N version skips signing"
-            exit 1
-          fi
 
           # Assigned first so a failed ls-remote stops the job instead of reading as "no tag".
           EXISTING="$(git ls-remote --tags origin "refs/tags/$TAG")"
@@ -152,14 +126,6 @@ jobs:
           if grep -Fxq -- "$TAG" <<<"$RELEASES"; then
             echo "::error::a release for $TAG already exists (it may be a draft)"
             exit 1
-          fi
-          # Betas get this refusal from next-prerelease.sh; -unsigned.N never passes through it.
-          if [ "$CHANNEL" = unsigned ]; then
-            SHIPPED="$(git ls-remote --tags origin "refs/tags/v$BASE")"
-            if [ -n "$SHIPPED" ] || grep -Fxq -- "v$BASE" <<<"$RELEASES"; then
-              echo "::error::v$BASE already exists; bump baseVersion before cutting a prerelease"
-              exit 1
-            fi
           fi
 
           if [ "$ALLOW_UNMERGED" != true ]; then
@@ -177,9 +143,16 @@ jobs:
             echo "channel=$CHANNEL"
             echo "prerelease=$SUFFIXED"
           } >> "$GITHUB_OUTPUT"
+          # Display only; resolve-version.sh already enforced the order.
+          LATEST="$( { git ls-remote --tags --refs origin | sed 's|^.*refs/tags/||'
+                       printf '%s\n' "$RELEASES"; } \
+            | grep -E "^v$NUM\.$NUM\.$NUM$" | sort -V | tail -n 1 || true)"
           # Shown to whoever approves the release environment, before anything is signed.
-          echo "### Releasing \`$TAG\` (channel \`$CHANNEL\`) from \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "releasing $TAG ($CHANNEL) from $SHA"
+          {
+            echo "### Releasing \`$TAG\` (channel \`$CHANNEL\`) from \`$SHA\`"
+            echo "Latest stable: \`${LATEST:-none}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "releasing $TAG ($CHANNEL) from $SHA, after ${LATEST:-no stable release}"
 
   build:
     needs: resolve
