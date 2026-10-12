@@ -247,29 +247,37 @@ swift build -c release
 swift test                     # the menu bar app's unit tests (XCTest needs Xcode)
 ```
 
-Needs only the Swift toolchain from Command Line Tools — no Xcode, no code signing.
+Needs only the Swift toolchain from Command Line Tools — no Xcode, and no signing
+certificate: `Scripts/make-app.sh` signs `Wallspan.app` ad-hoc.
 
 ## Releases
 
 Every build says which of three channels it came from, so an installed copy can be traced
 back to a commit. `wallspan version` prints it.
 
-| channel | example | where it comes from |
-|---|---|---|
-| `release` | `0.2.0` | a tagged release, on the [releases page](../../releases) |
-| `snapshot` | `0.2.0-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact |
-| `dev` | `0.2.0-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact |
+| channel | example | where it comes from | signed |
+|---|---|---|---|
+| `release` | `0.2.0` | a tagged release, on the [releases page](../../releases) | Developer ID, notarised |
+| `snapshot` | `0.2.0-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact | ad-hoc |
+| `dev` | `0.2.0-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact | ad-hoc |
 
 A plain `swift build` reports the bare version and channel `local`.
 
 A release ships four assets: the CLI as a tarball, the same CLI as a bare binary, the
-`Wallspan.app` bundle, and `SHA256SUMS.txt` to check them with. Nothing is signed or
-notarised, so Gatekeeper blocks all of it until you clear the quarantine attribute — each
-release's notes carry the exact commands.
+`Wallspan.app` bundle, and `SHA256SUMS.txt` to check them with. The CLI and the app are
+signed with a Developer ID, use the hardened runtime, and are notarised by Apple, with the
+ticket stapled to the app, so a downloaded copy opens without clearing any quarantine
+attribute.
+A bare binary cannot carry a stapled ticket, though: the first time a downloaded CLI runs,
+macOS checks its notarisation with Apple, so that first run needs a network connection.
+Snapshot and dev builds are only ad-hoc signed, and Gatekeeper still blocks them once
+downloaded.
 
 Releases are cut by running the `release` workflow against a ref. It builds and verifies
 first, then leaves a draft for review; the git tag is created only when that draft is
-published.
+published. Signing happens in a separate job that waits for approval in the `release`
+environment, which holds the certificate and the notary key, and fails with the exact
+`gh secret set` command for anything missing.
 
 ### Checking for updates
 

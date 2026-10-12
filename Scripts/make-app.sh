@@ -2,8 +2,8 @@
 # Assembles Wallspan.app from the SwiftPM products.
 #
 # SwiftPM cannot emit a bundle, so this builds both executables and lays them out by hand.
-# Ad-hoc signed: enough to run locally and in CI, and to be re-signed with a Developer ID
-# later without changing the layout.
+# Ad-hoc signed with the hardened runtime; the release workflow re-signs the same layout
+# with a Developer ID.
 #
 # usage: Scripts/make-app.sh [--universal] [--out DIR]
 #                            [--version STRING] [--build-version N.N.N]
@@ -115,11 +115,9 @@ if [ "$CLI_SCHEMA" -lt "$MIN_SCHEMA" ] || [ "$CLI_SCHEMA" -gt "$MAX_SCHEMA" ]; t
     refuse_bundle "the bundled CLI speaks schema ${CLI_SCHEMA}; the app understands ${RANGE}"
 fi
 
-# --deep is deprecated for signing but still the simplest way to cover the nested helper;
-# the helper is signed first so the outer signature seals an already-signed tree.
-codesign --force --sign - --timestamp=none "$APP/Contents/Helpers/wallspan"
-codesign --force --sign - --timestamp=none "$APP"
-codesign --verify --deep --strict "$APP"
+# The hardened runtime here too, so a local or PR build breaks the way a release would.
+Scripts/sign-app.sh --identity - "$APP"
+Scripts/check-signature.sh "$APP" "$APP/Contents/Helpers/wallspan"
 
 # ditto, not zip: zip mangles a signed bundle's symlinks and metadata, and the signature
 # then fails to verify on the machine that unpacks it.
