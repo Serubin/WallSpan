@@ -8,6 +8,7 @@ import SwiftUI
 /// settled on, which candidates it passed over, and the log the background agent writes.
 struct AboutView: View {
     @ObservedObject var model: AboutModel
+    var onCheckForUpdates: () -> Void
     var onClose: () -> Void
 
     private var info: AboutInfo { model.info }
@@ -73,12 +74,14 @@ struct AboutView: View {
                     .truncationMode(.middle)
                     .help(resolution.url.path)
 
-                if !resolution.rejected.isEmpty {
+                if !resolution.newer.isEmpty {
+                    newerNotice(resolution)
+                }
+
+                let skipped = resolution.rejected.filter { $0.newer == nil }
+                if !skipped.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
-                        // By index: `rejected` is an array of tuples, which Swift has no
-                        // key path into for `ForEach`'s id.
-                        ForEach(resolution.rejected.indices, id: \.self) { index in
-                            let candidate = resolution.rejected[index]
+                        ForEach(Array(skipped.enumerated()), id: \.offset) { _, candidate in
                             Text("Skipped \(candidate.url.path) — \(candidate.reason)")
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -97,6 +100,44 @@ struct AboutView: View {
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Informational, not a warning: a CLI ahead of this app is a normal state, and the
+    /// fallback named here is fully working.
+    private func newerNotice(_ resolution: BinaryResolver.Resolution) -> some View {
+        let fallback = resolution.source == .bundled
+            ? "the copy bundled with the app" : resolution.url.path
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(resolution.newer.enumerated()), id: \.offset) { _, rejection in
+                let sentence = newerSentence(rejection, fallback: fallback)
+                Label(sentence, systemImage: "info.circle")
+                    .lineLimit(4)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(sentence)
+            }
+            HStack(spacing: 8) {
+                // Conditional: a development CLI can be ahead of every release there is.
+                let them = resolution.newer.count == 1 ? "it" : "them"
+                Text("A newer Wallspan may understand \(them).")
+                Button("Check for Updates…", action: onCheckForUpdates)
+                    .controlSize(.small)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.top, 4)
+    }
+
+    private func newerSentence(_ rejection: BinaryResolver.Rejection, fallback: String) -> String {
+        let schema = rejection.newer?.schema ?? 0
+        // Self-reported by a binary this app does not understand, so bounded before display.
+        let version = rejection.newer?.version.map { v in
+            v.count > 40 ? " \(v.prefix(40))…" : " \(v)"
+        } ?? ""
+        return "Your wallspan\(version) at \(rejection.url.path) uses a newer contract "
+            + "(schema \(schema); this app reads up to \(Contract.maximumSchema)), "
+            + "so \(fallback) is in use."
     }
 
     private var footer: some View {

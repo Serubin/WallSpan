@@ -21,6 +21,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// start working on the next poll, and retrying every 15s would restart the agent in a
     /// loop for as long as the app is open.
     private var didAttemptRepair = false
+    /// One re-resolve per run of `.incompatible` replies. A CLI whose `version` passes the
+    /// probe but whose `status` does not would otherwise re-resolve on every poll.
+    private var reresolvedForIncompatible = false
 
     /// Every CLI call runs here. Serial, so two menu clicks cannot interleave a `pause` and
     /// a `status` and render the earlier one's answer.
@@ -75,6 +78,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 line = "no usable wallspan binary found"
             }
             FileHandle.standardError.write(Data((line + "\n").utf8))
+            for rejection in resolved?.rejected ?? [] {
+                FileHandle.standardError.write(
+                    Data("skipped \(rejection.url.path): \(rejection.reason)\n".utf8)
+                )
+            }
             DispatchQueue.main.async {
                 self?.didResolve = true
                 self?.resolution = resolved
@@ -97,9 +105,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func refresh() {
         guard let runner = resolution?.runner else { return }
         queue.async { [weak self] in
-            let status = try? runner.status()
-            let agent = try? runner.agent()
-            let layout = try? runner.layout()
+            var incompatible = false
+            func read<T>(_ call: () throws -> T) -> T? {
+                do { return try call() } catch {
+                    if case CLIRunner.RunError.incompatible = error { incompatible = true }
+                    return nil
+                }
+            }
+            let status = read { try runner.status() }
+            let agent = read { try runner.agent() }
+            let layout = read { try runner.layout() }
             DispatchQueue.main.async {
                 self?.status = status
                 self?.agent = agent
@@ -108,8 +123,26 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 self?.updateAbout()
                 self?.repairAgentIfBroken()
                 if self?.menuIsOpen == true { self?.rebuild() }
+                self?.reresolveIfIncompatible(incompatible, runner: runner)
             }
         }
+    }
+
+    /// The CLI on PATH can be upgraded under a running app, so a schema it passed the probe
+    /// with is not the one it speaks now.
+    private func reresolveIfIncompatible(_ incompatible: Bool, runner: CLIRunner) {
+        // A reply from a runner already replaced says nothing about the current one.
+        guard runner.binary == resolution?.url else { return }
+        guard incompatible else {
+            reresolvedForIncompatible = false
+            return
+        }
+        guard !reresolvedForIncompatible else { return }
+        reresolvedForIncompatible = true
+        FileHandle.standardError.write(
+            Data("\(runner.binary.path) stopped speaking a supported schema; looking again\n".utf8)
+        )
+        resolveBinary()
     }
 
     /// Runs a subcommand, then refreshes. Failures surface as an alert rather than a silent
@@ -287,8 +320,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// interrupting over.
     private func addSwitchBinaryItemIfUseful() {
         guard let resolution, let agent, agent.loaded, agent.programExists,
-              let program = agent.program,
-              URL(fileURLWithPath: program).standardizedFileURL != resolution.url.standardizedFileURL
+              let program = agent.program
+        else { return }
+        let programURL = URL(fileURLWithPath: program).standardizedFileURL
+        guard programURL != resolution.url.standardizedFileURL,
+              // Off a CLI this app passed over as newer, a switch would be a downgrade.
+              !resolution.newer.contains(where: { $0.url.standardizedFileURL == programURL })
         else { return }
 
         let item = item("Switch Background Cycling to This Copy", #selector(switchAgentBinary))
@@ -601,7 +638,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// Also the entry point for `--about`. Opens immediately even at launch, before the
     /// binary probe and the first agent report land; `refresh` fills the window in.
     func showAbout() {
-        about.show(info: .current(resolution: resolution, logPath: agent?.logPath))
+        about.show(info: .current(resolution: resolution, logPath: agent?.logPath)) {
+            [weak self] in self?.checkForUpdatesNow()
+        }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
@@ -687,6 +726,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func checkForUpdatesNow() {
+        guard !updateCheckInFlight else { return }
         updateCheckInFlight = true
         if menuIsOpen { rebuild() }
         updates.check(force: true, against: .current(resolution: resolution)) {

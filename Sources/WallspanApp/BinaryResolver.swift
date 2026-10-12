@@ -14,15 +14,25 @@ enum BinaryResolver {
         case bundled = "the app bundle"
     }
 
+    /// A candidate that was found but not used, with why.
+    struct Rejection {
+        let url: URL
+        let reason: String
+        /// Set only for a CLI passed over for speaking a newer schema, which About explains
+        /// rather than lists: nothing is wrong with it, this app is just behind.
+        let newer: (schema: Int, version: String?)?
+    }
+
     struct Resolution {
         let runner: CLIRunner
         let source: Source
         let version: Contract.Version
-        /// Candidates that were found but not used, with why. Shown in About, so "it is
-        /// running the wrong one" is diagnosable without a terminal.
-        let rejected: [(url: URL, reason: String)]
+        /// Shown in About, so "it is running the wrong one" is diagnosable without a
+        /// terminal.
+        let rejected: [Rejection]
 
         var url: URL { runner.binary }
+        var newer: [Rejection] { rejected.filter { $0.newer != nil } }
     }
 
     /// Where a Homebrew or hand-installed CLI lands. Consulted only if the login shell
@@ -59,9 +69,24 @@ enum BinaryResolver {
         return URL(fileURLWithPath: path)
     }
 
-    private enum Probe {
+    enum Probe {
         case usable(Contract.Version)
+        case newer(schema: Int, version: String?)
         case unusable(String)
+    }
+
+    /// Newer is decided before the payload is looked at: a CLI that re-typed `version` in
+    /// a schema bump is ahead of this app, not broken.
+    static func classify(schema: Int, version: Contract.Version?,
+                         supported: ClosedRange<Int> = Contract.supportedSchemas) -> Probe {
+        if schema > supported.upperBound {
+            return .newer(schema: schema, version: version?.version)
+        }
+        if schema < supported.lowerBound {
+            return .unusable("schema \(schema), this app needs \(supported.lowerBound) or newer")
+        }
+        guard let version else { return .unusable("did not answer `version --json`") }
+        return .usable(version)
     }
 
     /// Accepts a candidate only if it answers `version --json` with a schema this build
@@ -71,18 +96,14 @@ enum BinaryResolver {
         guard FileManager.default.isExecutableFile(atPath: url.path) else {
             return .unusable("not executable")
         }
-        let runner = CLIRunner(binary: url)
-        guard let version = try? runner.version(timeout: 5) else {
+        guard let answer = try? CLIRunner(binary: url).probeVersion(timeout: 5) else {
             return .unusable("did not answer `version --json`")
         }
-        guard version.schema >= Contract.minimumSchema else {
-            return .unusable("schema \(version.schema), need \(Contract.minimumSchema)+")
-        }
-        return .usable(version)
+        return classify(schema: answer.schema, version: answer.version)
     }
 
     static func resolve(preferBundled: Bool = false) -> Resolution? {
-        var rejected: [(URL, String)] = []
+        var rejected: [Rejection] = []
 
         var candidates: [(URL, Source)] = []
         if !preferBundled {
@@ -102,10 +123,14 @@ enum BinaryResolver {
             case .usable(let version):
                 return Resolution(runner: CLIRunner(binary: url), source: source,
                                   version: version, rejected: rejected)
+            case .newer(let schema, let version):
+                let reason = "schema \(schema), this app understands up to "
+                    + "\(Contract.maximumSchema)"
+                rejected.append(Rejection(url: url, reason: reason, newer: (schema, version)))
             case .unusable(let reason):
                 // A well-known path that simply has nothing in it is not worth reporting.
                 if FileManager.default.fileExists(atPath: url.path) {
-                    rejected.append((url, reason))
+                    rejected.append(Rejection(url: url, reason: reason, newer: nil))
                 }
             }
         }

@@ -35,6 +35,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// For make-app.sh, which checks the bundled CLI against this before signing. Answered
+// ahead of the single-instance claim, so a running Wallspan does not swallow it.
+if CommandLine.arguments.contains("--supported-schemas") {
+    print("\(Contract.minimumSchema) \(Contract.maximumSchema)")
+    exit(0)
+}
+
 // Before anything is put in the menu bar: a second status item is the visible symptom,
 // but the real hazard is two of them pausing and resuming cycling independently.
 guard SingleInstance.claim() else {

@@ -67,8 +67,10 @@ open dist/Wallspan.app
 It is a wrapper, not a second implementation — it spawns `wallspan` and reads its `--json`
 output, and contains no wallpaper logic of its own. So it prefers whichever `wallspan` is
 on your `PATH` and falls back to the copy inside the bundle, which means updating the CLI
-updates the app's behaviour with no new app. **About Wallspan** shows which one is in use,
-which candidates were passed over and why, and opens `~/Library/Logs/wallspan.log`;
+updates the app's behaviour with no new app — for additive changes. A CLI with a breaking
+contract change this app predates is passed over for the bundled copy until the app
+catches up. **About Wallspan** shows which one is in use, which candidates were passed
+over and why, and opens `~/Library/Logs/wallspan.log`;
 `defaults write net.serubin.wallspan.app PreferBundledCLI -bool true` pins it to the bundle.
 
 The contract between them is [documented](docs/cli-json-contract.md) and versioned, so the
