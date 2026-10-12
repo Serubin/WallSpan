@@ -47,11 +47,12 @@ So a caller must:
 to feature-detect rather than to compare version strings — that is what keeps additive
 growth from needing a bump.
 
-`channel` and `commit` say how the binary was built (`release`, `snapshot`, `dev`, or
-`local` for an unstamped working tree) and which commit it came from. They exist so a bug
-report names a tree rather than a version, and are for display only — a caller that gates
-on `channel` strands anyone running a snapshot, which is exactly the audience most worth
-hearing from. `commit` is empty for a local build.
+`channel` and `commit` say how the binary was built (`release`, `beta` for a signed
+`-beta.N` or `-rc.N` prerelease, `unsigned` for an ad-hoc `-unsigned.N` one, `snapshot`,
+`dev`, or `local` for an unstamped working tree) and which commit it came from. They exist
+so a bug report names a tree rather than a version, and are for display only — a caller that
+gates on `channel` strands anyone running a snapshot, which is exactly the audience most
+worth hearing from. `commit` is empty for a local build.
 
 Dates are ISO-8601 strings, not Foundation reference-date numbers.
 

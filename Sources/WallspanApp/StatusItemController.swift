@@ -888,9 +888,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         case .available(let offer):
             offerUpdate(offer)
         case .upToDate(let latest):
-            inform("You're up to date.", "\(latest) is the latest release.")
+            inform("You're up to date.",
+                   "\(latest) is the latest \(latest.isBeta ? "beta" : "release").")
         case .ahead(let latest):
-            inform("You're ahead of the latest release.",
+            inform("You're ahead of the latest \(latest.isBeta ? "beta" : "release").",
                    "This build is newer than \(latest).")
         case .failed(let why):
             report(why, while: "check for updates")

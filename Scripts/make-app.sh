@@ -30,8 +30,8 @@ done
 # building, which leaves the tree dirty, so `describe --dirty` would brand every CI build
 # `-dirty`. The describe stays as the answer for a hand build that passed no version.
 if [ -z "$VERSION" ]; then
-    VERSION="$(git describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null \
-        || echo 0.0.0)"
+    VERSION="$(git describe --tags --always --dirty --match 'v[0-9]*' --exclude 'v*-*' \
+        2>/dev/null || echo 0.0.0)"
 fi
 if [ -z "$SHORT" ]; then
     # CFBundleVersion must be a dot-separated number; a describe like v0.1.0-3-gabc1234

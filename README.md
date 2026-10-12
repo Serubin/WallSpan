@@ -252,12 +252,14 @@ certificate: `Scripts/make-app.sh` signs `Wallspan.app` ad-hoc.
 
 ## Releases
 
-Every build says which of three channels it came from, so an installed copy can be traced
-back to a commit. `wallspan version` prints it.
+Every build says which channel it came from, so an installed copy can be traced back to a
+commit. `wallspan version` prints it.
 
 | channel | example | where it comes from | signed |
 |---|---|---|---|
 | `release` | `0.2.0` | a tagged release, on the [releases page](../../releases) | Developer ID, notarised |
+| `beta` | `0.2.0-beta.3`, `0.2.0-rc.1` | a prerelease on the releases page, and `wallspan@beta` in the tap | Developer ID, notarised |
+| `unsigned` | `0.2.0-unsigned.1` | a prerelease for testing the release workflow | ad-hoc |
 | `snapshot` | `0.2.0-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact | ad-hoc |
 | `dev` | `0.2.0-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact | ad-hoc |
 
@@ -279,6 +281,21 @@ published. Signing happens in a separate job that waits for approval in the `rel
 environment, which holds the certificate and the notary key, and fails with the exact
 `gh secret set` command for anything missing.
 
+Betas are signed and notarised exactly like releases. Pass `beta` or `rc` as the version
+and the workflow picks the next number, counting drafts; it refuses a beta once an `rc` of
+the same version exists, and any prerelease once that version has shipped. To follow betas
+with Homebrew, install the beta cask instead of the stable one:
+
+```sh
+brew uninstall --cask wallspan
+brew install --cask serubin/tap/wallspan@beta
+```
+
+`wallspan@beta` moves to each new beta, and to each stable release that is newer than its
+latest beta, so it never falls behind the stable cask. There is no beta formula. Switching
+casks removes the LaunchAgent, so turn **Cycle in the Background** back on afterwards.
+Unsigned prereleases never reach the tap.
+
 ### Checking for updates
 
 Nothing here phones home unless you ask it to. **Check for Updates Automatically** in the
@@ -291,12 +308,22 @@ When it does run, this is the whole of it: one unauthenticated `GET` of
 https://api.github.com/repos/Serubin/WallSpan/releases/latest
 ```
 
-and nothing else. The only field read from the answer is `tag_name`. The request carries no
-identifier, no version, no install count and no beacon — just `Accept`, a bare
-`User-Agent: Wallspan` and `Accept-Language: en`. Those last two are pinned deliberately:
-left alone, the defaults would report the app version, your exact macOS build, and the
-language list you have configured. No `If-None-Match`, so there is no per-install token to
-echo back either, and no cookies are stored or sent.
+and nothing else. The only fields read from the answer are `tag_name`, `draft` and
+`prerelease`. An install on the beta track — a beta build, or the `wallspan@beta` cask —
+asks for the newest ten releases instead, since `releases/latest` never returns a
+prerelease:
+
+```
+https://api.github.com/repos/Serubin/WallSpan/releases?per_page=10
+```
+
+and reads the same three fields from each. Which of the two URLs is asked for does tell
+GitHub whether this install follows betas. The request carries no identifier, no version, no
+install count and no beacon — just `Accept`, a bare `User-Agent: Wallspan` and
+`Accept-Language: en`. Those last two are pinned deliberately: left alone, the defaults
+would report the app version, your exact macOS build, and the language list you have
+configured. No `If-None-Match`, so there is no per-install token to echo back either, and no
+cookies are stored or sent.
 
 Automatic checks happen at most once a day, and the time of the last successful one is
 remembered so relaunching in a loop does not repeat it. Nothing is downloaded and nothing
@@ -308,6 +335,9 @@ The app compares the release against both halves — the `wallspan` it resolved 
 bundle — and reports whichever is behind. It never offers a downgrade, and a `snapshot` or
 `dev` build is never nudged toward an older `release`. If Homebrew installed the stale half
 you are given `brew upgrade` rather than a zip Homebrew would overwrite on its next run.
+The beta track is offered newer betas as well as the next release; everything else is
+offered releases only. A beta is never offered through the stable cask or the formula,
+which cannot install one, so those halves get the release page instead.
 
 A failed automatic check says nothing at all — offline, rate limited and captive-portalled
 are not worth an alert. A failed *manual* check tells you why, because you asked.

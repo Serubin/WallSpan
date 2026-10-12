@@ -7,10 +7,10 @@ description: >
 
 inputs:
   channel:
-    description: release | snapshot | dev
+    description: release | beta | unsigned | snapshot | dev
     required: true
   version:
-    description: Explicit version, for the release channel. Derived otherwise.
+    description: Explicit version, for the release, beta and unsigned channels. Derived otherwise.
     required: false
     default: ""
   pr-number:
@@ -52,9 +52,8 @@ runs:
     - name: Stamp the version
       id: version
       shell: bash
-      # Through env rather than interpolated into the script: `version` reaches here from
-      # a workflow_dispatch input, and an expression pasted into bash is a quote away from
-      # being a command. version.sh validates nothing — this is what keeps it honest.
+      # Through env, not interpolated: `version` reaches here from a workflow_dispatch input,
+      # and an expression pasted into bash is a quote away from being a command.
       env:
         CHANNEL: ${{ inputs.channel }}
         VERSION: ${{ inputs.version }}
@@ -71,6 +70,10 @@ runs:
       shell: bash
       # Debug and host-arch only: these cover the app's logic, not the universal link.
       run: swift test
+
+    - name: Release script tests
+      shell: bash
+      run: Scripts/test-next-prerelease.sh
 
     - name: Build Wallspan.app
       id: app
@@ -154,13 +157,20 @@ runs:
       env:
         BIN: ${{ steps.app.outputs.cli }}
         WANT: ${{ steps.version.outputs.version }}
+        WANT_CHANNEL: ${{ inputs.channel }}
       run: |
         set -euo pipefail
-        GOT="$("$BIN" version --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"]["version"])')"
+        REPORT="$("$BIN" version --json)"
+        GOT="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["version"]["version"])' <<<"$REPORT")"
         # An artifact whose filename and self-report disagree is worse than either being
         # wrong, because only one of them is visible once it is installed.
         [ "$GOT" = "$WANT" ] || { echo "::error::binary reports $GOT, expected $WANT"; exit 1; }
-        echo "$GOT"
+        # The app's update checker reads the channel, so a beta stamped as release would
+        # never be offered the next beta.
+        CHANNEL="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["version"]["channel"])' <<<"$REPORT")"
+        [ "$CHANNEL" = "$WANT_CHANNEL" ] \
+          || { echo "::error::binary reports channel $CHANNEL, expected $WANT_CHANNEL"; exit 1; }
+        echo "$GOT ($CHANNEL)"
 
     - name: Smoke test
       shell: bash

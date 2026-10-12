@@ -1,32 +1,66 @@
 name: tap
 
-# Bumps the wallspan cask and formula in Serubin/homebrew-tap.
-#
-# This hangs off `release: published` rather than off the build that produced the assets,
-# because release.yml deliberately stops at a draft: GitHub creates the tag, and makes the
-# assets publicly downloadable, only when a human publishes it. A bump wired into the build
-# would be pointing the tap at a URL that does not resolve yet.
+# Bumps the wallspan casks and formula in Serubin/homebrew-tap.
 
 # Releases are notarised, so once the tap points at one the cask needs no quarantine caveat.
 on:
+  # Publishing, not the build: release.yml stops at a draft, whose assets do not resolve yet.
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: A published release's tag, e.g. v0.2.0 or v0.2.0-beta.1
+        required: true
 
-permissions:
-  contents: read
-
-# Two releases published close together would race on the tap push. Never cancelled — a
-# cancelled run may already have pushed.
-concurrency:
-  group: tap
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  bump:
-    # Prereleases stay off the tap. `brew install` has no way to ask for one, so publishing
-    # a prerelease here would quietly make it what everybody installs.
-    if: github.repository == 'Serubin/WallSpan' && !github.event.release.prerelease
+  # A release event runs this file from the tagged commit, which may be unmerged: so no
+  # secret here, only a dispatch of `bump` on main, whose `tap` environment admits main alone.
+  dispatch:
+    if: github.event_name == 'release' && github.repository == 'Serubin/WallSpan'
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Hand the tag to main
+        # Through env rather than interpolated into the script: a tag name pasted into bash
+        # is a quote away from being a command.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          # -unsigned.N, and anything else, is not something a tap should install.
+          if ! [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-(beta|rc)\.[1-9][0-9]*)?$ ]]; then
+            echo "::notice::the published tag is neither a stable release nor a beta; the tap is left alone"
+            exit 0
+          fi
+          SUFFIXED=false
+          if [ -n "${BASH_REMATCH[2]}" ]; then SUFFIXED=true; fi
+          if [ "$PRERELEASE" != "$SUFFIXED" ]; then
+            echo "::error::$TAG is marked prerelease=$PRERELEASE; publish it with prerelease=$SUFFIXED"
+            exit 1
+          fi
+          gh workflow run tap.yml --ref main -f tag="$TAG"
+          echo "### Dispatched the tap bump for $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  bump:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+      && github.repository == 'Serubin/WallSpan'
+    runs-on: ubuntu-latest
+    environment: tap
+    permissions:
+      contents: read
+    # Two releases published close together would race on the tap push. Never cancelled — a
+    # cancelled run may already have pushed.
+    concurrency:
+      group: tap
+      cancel-in-progress: false
     steps:
       # Fail before anything is downloaded or cloned. The alternative is finding the secret
       # missing at the push, with the release already public and the tap left stale.
@@ -35,25 +69,46 @@ jobs:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           if [ -z "${TAP_GITHUB_TOKEN}" ]; then
-            echo "::error::TAP_GITHUB_TOKEN is unset. Create a fine-grained PAT with contents:write on Serubin/homebrew-tap and run: gh secret set TAP_GITHUB_TOKEN --repo Serubin/WallSpan"
+            echo "::error::TAP_GITHUB_TOKEN is unset in the tap environment. Create a fine-grained PAT with contents:write on Serubin/homebrew-tap and run: gh secret set TAP_GITHUB_TOKEN --env tap --repo Serubin/WallSpan"
             exit 1
           fi
 
-      - name: Download and verify the assets
-        id: assets
-        # Through env rather than interpolated into the script, matching release.yml: a tag
-        # name pasted into bash is a quote away from being a command.
+      - name: Classify the release
+        id: release
+        # A dispatch can name any tag, so this repeats every check the release event made.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          V="${TAG#v}"
+          if ! [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-(beta|rc)\.[1-9][0-9]*)?$ ]]; then
+            echo "::error::the tag input is not vX.Y.Z, vX.Y.Z-beta.N or vX.Y.Z-rc.N"
+            exit 1
+          fi
+          KIND=stable
+          if [ -n "${BASH_REMATCH[2]}" ]; then KIND=beta; fi
+
+          STATE="$(gh release view "$TAG" --json isDraft,isPrerelease \
+            --jq '"\(.isDraft) \(.isPrerelease)"')"
+          if [ "$STATE" != "false $([ "$KIND" = beta ] && echo true || echo false)" ]; then
+            echo "::error::$TAG must be published, and a prerelease exactly when it has a suffix (draft, prerelease: $STATE)"
+            exit 1
+          fi
+          { echo "kind=$KIND"; echo "version=${TAG#v}"; } >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify the assets
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          V: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
           ZIP="Wallspan-$V.zip"
           TARBALL="wallspan-$V-universal.tar.gz"
 
-          gh release download "$TAG" --dir assets \
+          gh release download "v$V" --dir assets \
             --pattern "$ZIP" --pattern "$TARBALL" --pattern SHA256SUMS.txt
 
           # SHA256SUMS.txt was written by the build from the same bytes it uploaded, so this
@@ -66,14 +121,14 @@ jobs:
           TAR_SHA256="$(awk -v f="$TARBALL" '$2 == f { print $1 }' assets/SHA256SUMS.txt)"
           # An asset renamed upstream would otherwise write an empty sha256 into the tap,
           # which fails much later and much less legibly.
-          for pair in "zip:$ZIP_SHA256" "tarball:$TAR_SHA256"; do
-            case "$pair" in
-              *:) echo "::error::no checksum for the ${pair%%:*} in SHA256SUMS.txt"; exit 1 ;;
-            esac
+          for sum in "$ZIP_SHA256" "$TAR_SHA256"; do
+            if ! [[ "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::SHA256SUMS.txt has no single checksum for $ZIP or $TARBALL"
+              exit 1
+            fi
           done
 
           {
-            echo "version=$V"
             echo "zip_sha256=$ZIP_SHA256"
             echo "tar_sha256=$TAR_SHA256"
           } >> "$GITHUB_OUTPUT"
@@ -81,37 +136,133 @@ jobs:
       - name: Bump the tap
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-          V: ${{ steps.assets.outputs.version }}
+          KIND: ${{ steps.release.outputs.kind }}
+          V: ${{ steps.release.outputs.version }}
           ZIP_SHA256: ${{ steps.assets.outputs.zip_sha256 }}
           TAR_SHA256: ${{ steps.assets.outputs.tar_sha256 }}
         run: |
           set -euo pipefail
+          # Semver precedence, checked against SemanticVersionTests' vectors below.
+          NEWER="$RUNNER_TEMP/newer.py"
+          cat > "$NEWER" <<'PY'
+          import re
+          import sys
+
+
+          def key(version):
+              m = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?", version)
+              if not m:
+                  print(f"not a version: {version!r}", file=sys.stderr)
+                  sys.exit(2)
+              core = tuple(int(n) for n in m.group(1, 2, 3))
+              if m.group(4) is None:
+                  return core, (1,)
+              ids = tuple((0, int(p), "") if p.isdigit() else (1, 0, p)
+                          for p in m.group(4).split("."))
+              return core, (0, ids)
+
+
+          # The vectors SemanticVersionTests checks, so this and the app cannot drift apart.
+          ASCENDING = ["0.2.0-beta.2", "0.2.0-beta.10", "0.2.0-rc.1", "0.2.0", "0.3.0-beta.1"]
+          if not all(key(a) < key(b) for a, b in zip(ASCENDING, ASCENDING[1:])):
+              print("semver comparison fails its own vectors", file=sys.stderr)
+              sys.exit(2)
+          sys.exit(0 if key(sys.argv[1]) > key(sys.argv[2]) else 1)
+          PY
+          # Exit 1 means "not newer"; anything else is a broken comparison and stops the run.
+          newer() {
+            local rc=0
+            python3 -I "$NEWER" "$1" "$2" || rc=$?
+            [ "$rc" -le 1 ] || exit "$rc"
+            return "$rc"
+          }
+
+          # Each stanza exactly once, and holding what was meant to be written.
+          expect() {
+            local file="$1" line="$2" stanza="${2%% \"*}"
+            if [ "$(grep -c "^$stanza \"" "$file")" != 1 ] || ! grep -Fxq -- "$line" "$file"; then
+              echo "::error::$file does not hold '$line' after the bump"
+              exit 1
+            fi
+          }
+
+          # The cask interpolates #{version} into its url, so only these two lines move.
+          bump_cask() {
+            sed -i \
+              -e "s|^  version \".*\"$|  version \"${V}\"|" \
+              -e "s|^  sha256 \".*\"$|  sha256 \"${ZIP_SHA256}\"|" \
+              "$1"
+            expect "$1" "  version \"${V}\""
+            expect "$1" "  sha256 \"${ZIP_SHA256}\""
+          }
+
           git clone --depth 1 \
             "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/Serubin/homebrew-tap.git" tap
           cd tap
 
-          # The cask interpolates #{version} into its url, so only these two lines move.
-          sed -i \
-            -e "s|^  version \".*\"$|  version \"${V}\"|" \
-            -e "s|^  sha256 \".*\"$|  sha256 \"${ZIP_SHA256}\"|" \
-            Casks/wallspan.rb
+          BETA=Casks/wallspan@beta.rb
+          BETA_AT=""
+          if [ -f "$BETA" ]; then
+            BETA_AT="$(sed -n 's/^  version "\(.*\)"$/\1/p' "$BETA")"
+            # newer() rejects anything but one version, so a garbled cask stops the run.
+            newer 0.0.0 "$BETA_AT" || true
+          fi
 
-          # The formula has no `version` stanza — Homebrew derives it from the url — so the
-          # url line is rewritten whole rather than patched in place.
-          sed -i \
-            -e "s|^  url \".*\"$|  url \"https://github.com/Serubin/WallSpan/releases/download/v${V}/wallspan-${V}-universal.tar.gz\"|" \
-            -e "s|^  sha256 \".*\"$|  sha256 \"${TAR_SHA256}\"|" \
-            Formula/wallspan.rb
+          FILES=()
+          if [ "$KIND" = stable ]; then
+            MESSAGE="wallspan@beta ${V}"
+            STABLE=Casks/wallspan.rb
+            STABLE_AT="$(sed -n 's/^  version "\(.*\)"$/\1/p' "$STABLE")"
+            # Never backwards: dispatching an older stable tag must not downgrade the tap.
+            if newer "$V" "$STABLE_AT"; then
+              MESSAGE="wallspan ${V}"
+              bump_cask "$STABLE"
+
+              # The formula has no `version` stanza — Homebrew derives it from the url — so the
+              # url line is rewritten whole rather than patched in place.
+              URL="https://github.com/Serubin/WallSpan/releases/download/v${V}/wallspan-${V}-universal.tar.gz"
+              sed -i \
+                -e "s|^  url \".*\"$|  url \"${URL}\"|" \
+                -e "s|^  sha256 \".*\"$|  sha256 \"${TAR_SHA256}\"|" \
+                Formula/wallspan.rb
+              expect Formula/wallspan.rb "  url \"${URL}\""
+              expect Formula/wallspan.rb "  sha256 \"${TAR_SHA256}\""
+              FILES+=("$STABLE" Formula/wallspan.rb)
+            else
+              echo "::notice::wallspan is at $STABLE_AT, which is not older than $V; left alone"
+            fi
+
+            # The beta track follows a stable that overtakes it, or `brew upgrade` strands it.
+            if [ -z "$BETA_AT" ]; then
+              echo "::warning::$BETA is missing, so the beta track was not moved to $V"
+            elif newer "$V" "$BETA_AT"; then
+              bump_cask "$BETA"
+              FILES+=("$BETA")
+            fi
+          else
+            MESSAGE="wallspan@beta ${V}"
+            if [ -z "$BETA_AT" ]; then
+              echo "::error::$BETA is missing from the tap; add it before publishing a beta"
+              exit 1
+            fi
+            # Never backwards: an older beta published late stays on the release page only.
+            if ! newer "$V" "$BETA_AT"; then
+              echo "::notice::wallspan@beta is at $BETA_AT, which is not older than $V; left alone"
+              exit 0
+            fi
+            bump_cask "$BETA"
+            FILES+=("$BETA")
+          fi
 
           # Re-publishing the same release should be a no-op, not an empty commit.
           if git diff --quiet; then
-            echo "tap already at $V"
+            echo "the tap needs no change for $V"
             exit 0
           fi
 
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -m "wallspan ${V}" Casks/wallspan.rb Formula/wallspan.rb
+              commit -m "$MESSAGE" -- "${FILES[@]}"
           git push
 
-          echo "### Tap bumped to wallspan $V" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Tap bumped: $MESSAGE" >> "$GITHUB_STEP_SUMMARY"

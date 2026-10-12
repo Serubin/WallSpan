@@ -63,6 +63,20 @@ struct SemanticVersion: Comparable, CustomStringConvertible {
         return a.prerelease.count < b.prerelease.count
     }
 
+    /// A `-beta.N` or `-rc.N` that release.yml signs, as opposed to a snapshot, an
+    /// `-unsigned.N` or `git describe` output.
+    var isBeta: Bool {
+        guard prerelease.count == 2, ["beta", "rc"].contains(prerelease[0]),
+              let n = prerelease[1].first, n != "0" else { return false }
+        return prerelease[1].allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    /// A tag the update checker may offer: a stable release or a beta, never anything else.
+    static func isTrackable(_ tag: String) -> Bool {
+        guard isPlausibleTag(tag), let version = SemanticVersion(tag) else { return false }
+        return version.prerelease.isEmpty || version.isBeta
+    }
+
     /// Gates every tag before it reaches a URL or a menu title. One arrives over the
     /// network and one from a user-writable plist, and they are the only untrusted strings
     /// in this path.

@@ -12,8 +12,8 @@ public enum Contract {}
 extension Contract {
     public struct VersionReport: Codable {
         public var version: String
-        /// How the build was produced: `release`, `snapshot`, `dev`, or `local`. For
-        /// display and bug reports — gating on it would strand a user running a snapshot.
+        /// How the build was produced: `release`, `beta`, `unsigned`, `snapshot`, `dev`,
+        /// or `local`. For display and bug reports — gating on it strands a snapshot user.
         public var channel: String
         /// Short commit the build came from, so a report names a tree rather than a
         /// version. Empty for an unstamped local build.

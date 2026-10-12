@@ -8,7 +8,8 @@
 #
 # usage: Scripts/changelog.sh [FROM [TO]] [--from REF] [--to REF] [--repo OWNER/NAME]
 #
-# FROM defaults to the nearest preceding v* tag, or the root commit for a first release.
+# FROM defaults to the nearest preceding stable v* tag, or the root commit for a first
+# release.
 # TO defaults to HEAD.
 set -euo pipefail
 
@@ -35,9 +36,10 @@ while [ $# -gt 0 ]; do
 done
 
 TO="${TO:-HEAD}"
-# --match, because backup/*, spr-backup/* and squashed/* tags are not releases; describing
-# against one would silently truncate the notes to a handful of commits.
-[ -n "$FROM" ] || FROM="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TO^" 2>/dev/null || true)"
+# --match skips backup/*, spr-backup/* and squashed/*, which would truncate the notes; and
+# --exclude skips betas, so every set of notes runs from the last stable.
+[ -n "$FROM" ] || FROM="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-*' \
+    "$TO^" 2>/dev/null || true)"
 
 if [ -n "$FROM" ]; then RANGE="$FROM..$TO"; else RANGE="$TO"; fi
 

@@ -8,7 +8,8 @@ extension Wallspan {
     /// Empty in a working tree, so `version` falls back to `baseVersion`.
     static let stampedVersion = ""
 
-    /// How this build was produced: `release`, `snapshot`, `dev`, or `local`.
+    /// How this build was produced: `release`, `beta`, `unsigned`, `snapshot`, `dev`, or
+    /// `local`.
     public static let channel = "local"
 
     /// Short commit the build came from; empty when it was not stamped.
