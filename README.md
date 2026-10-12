@@ -9,127 +9,125 @@
 
 A replacement for aging paid alternatives for applying multi monitor spanning wallpapers.
 
-macOS only. No dependencies, no telemetry, no subscription. The CLI never touches the
-network; the menu bar app does so only to [check for
-updates](#checking-for-updates) — automatically if you turn that on, which is off by
-default, or when you ask it to.
+A menu bar app, and the command line tool underneath it. macOS 14 or later. No
+dependencies, no telemetry, no subscription. The CLI never touches the network. The app
+only does so to [check for updates](#checking-for-updates) when you ask, or automatically
+if you turn that on.
 
 ## What it does
 
 - **Spans one wallpaper across all your displays** as a single continuous image.
-- **Compensates for bezels**, so the picture lines up to your eye rather than merely
-  lining up in macOS's coordinate space.
-- **Corrects for panels of differing pixel density**, so an image is the same real-world
-  size on each screen.
-- **Cycles a folder** on an interval, optionally running unattended in the background.
+- **Compensates for bezels**, so the picture lines up to your eye.
+- **Corrects for differing pixel density**, so an image is the same real-world size on
+  each screen.
+- **Helps you align your monitors**, so the cursor crosses each seam where the picture
+  does.
+- **Cycles a folder** on an interval, in the background and across logins.
 
-## Usage
+## Install
+
+**Stable:**
+
+```sh
+brew install --cask serubin/tap/wallspan
+
+# or
+brew tap serubin/tap
+brew install --cask wallspan
+```
+
+**Beta:**
+
+```sh
+brew install --cask serubin/tap/wallspan@beta
+
+# or
+brew tap serubin/tap
+brew install wallspan@beta
+```
+
+Upgrading or switching casks turns cycling off, so choose **Enable Cycling** again after.
+
+Without Homebrew, grab `Wallspan-<version>.zip` from the latest prerelease on the
+[releases page](../../releases).
+
+## Getting started
+
+Wallspan lives in the menu bar.
+
+1. **Choose Folder…** - pick a folder of images. Avoid Desktop, Documents and Downloads:
+   the background agent can't ask for permission there, so it fails quietly.
+2. **Change Every** - 5 minutes to a day.
+3. **Enable Cycling**.
+
+**Next Wallpaper** changes it now. **Pause Cycling** stops the schedule, and stays paused
+across reboots.
+
+**Enable Cycling** installs a LaunchAgent that keeps running after you quit the app and
+across logins. **Open Wallspan at Login** is separate and only brings the menu bar item
+back.
+
+## Calibrating your displays
+
+macOS places displays edge to edge, with no way to describe the bezels between them, so a
+spanned image breaks across each seam. wallspan models each panel in millimetres, so the
+part of the image behind a bezel is hidden, not squeezed into view.
+
+**Displays ▸ Calibrate…** draws a test pattern over every screen without touching your
+wallpaper. Line up the long diagonals across each bezel:
+
+- **Position** - arrow keys, or drag a screen. Diagonals stepping **down-right** across a
+  seam mean the gap is too small, **up-right** too large. Your main display stays put.
+- **Scale** - **Panel scale**, or **⌥↑ / ⌥↓**. Use it when circles break across a seam but
+  the diagonals line up.
+
+**Align in System Settings…** then lines up the macOS display arrangement vertically to
+match, which decides where the cursor crosses between screens. It shows the change first.
+**Revert to Saved** or `wallspan layout arrange --revert` restores the arrangement you had
+before wallspan.
+
+### Panel sizes
+
+macOS reads each panel's size from EDID, and monitors often get it wrong. One LG here
+claims 109 PPI across but 111 PPI down, which no real panel has. wallspan keeps the
+reported diagonal, which EDID rounding barely moves, and forces square pixels. That
+removes the non-square error without asking.
+
+A size wrong by the same proportion on both axes looks consistent, so only your eye can
+catch it - that's what Panel scale is for. A ⚠︎ in the **Displays** submenu means a stored
+size still implies non-square pixels. Set both axes with `wallspan layout size`.
+
+## The command line
+
+The app changes your wallpaper and layout by running `wallspan`, and the CLI covers what
+the app doesn't.
 
 ```sh
 wallspan info                                  # your displays, and how they're mapped
 wallspan preview img.jpg -o out.png            # see the crop without touching anything
 wallspan apply img.jpg                         # span it across every display
-wallspan apply img.jpg --dry-run               # render only, change nothing
 wallspan cycle ~/Pictures/Backgrounds --interval 15m
-wallspan restore                               # back to your previous wallpaper
-```
+wallspan restore                               # back to your wallpaper from before wallspan
 
-Once something is cycling, drive it without stopping it:
-
-```sh
 wallspan status                                # what is on screen, and what is next
-wallspan next                                  # change now
-wallspan pause                                 # stop changing; the setting sticks
+wallspan next
+wallspan pause
 wallspan resume
 ```
 
-`pause` is a setting rather than a signal, so it survives a reboot and the agent
-restarting. `next` works while paused and leaves it paused: pausing stops the schedule,
-not the button.
-
-`apply` saves your existing wallpaper the first time it runs, so `restore` always returns
-to what you had before wallspan, not to whatever it set most recently.
-
-To keep it cycling in the background and across logins, see
-[Running unattended](#running-unattended).
-
-## The menu bar app
-
-`Wallspan.app` is a menu bar item for people who would rather not use a terminal: it shows
-what is on screen and when it changes next, and offers Next, Pause, a folder picker and
-an interval.
-
-```sh
-Scripts/make-app.sh          # builds dist/Wallspan.app
-open dist/Wallspan.app
-```
-
-It is a wrapper, not a second implementation — it spawns `wallspan` and reads its `--json`
-output, and contains no wallpaper logic of its own. So it prefers whichever `wallspan` is
-on your `PATH` and falls back to the copy inside the bundle, which means updating the CLI
-updates the app's behaviour with no new app — for additive changes. A CLI with a breaking
-contract change this app predates is passed over for the bundled copy until the app
-catches up. **About Wallspan** shows which one is in use, which candidates were passed
-over and why, and opens `~/Library/Logs/wallspan.log`;
-`defaults write net.serubin.wallspan.app PreferBundledCLI -bool true` pins it to the bundle.
-The menu still recognises a CLI installed elsewhere, without running it or asking your
-shell, and says the app is using the bundled copy instead.
-
-The contract between them is [documented](docs/cli-json-contract.md) and versioned, so the
-two can be released independently.
-
-Two switches, deliberately separate. **Cycle in the Background** installs the LaunchAgent
-described below, pointed at the binary the app resolved; cycling then continues after you
-quit the app, which is the intent rather than a bug. **Open Wallspan at Login** only brings
-the menu bar item back.
-
-If the agent is left pointing at a binary that no longer exists — you moved the app out of
-Downloads, say — the app repairs it on the next launch. If it points at a different but
-working copy, the app leaves it alone and offers to switch instead.
-
-**Install CLI…** symlinks the bundled CLI into `~/.local/bin`, so `wallspan` works in a
-terminal too. A symlink rather than a copy, so it tracks the app. It is offered only when
-no `wallspan` answers by name: otherwise the entry is disabled and says who put that one
-there — **CLI Installed by Homebrew** for the formula or the cask, **CLI Linked to Another
-Wallspan** for a link into a different copy of the app, **Another wallspan Is on PATH**
-for something else by that name — since a second link would only be a way to run the
-wrong one. Hover it for the path, whether a terminal finds it first, and why the app runs
-a different copy if it does. It is re-checked each time the menu opens, so a CLI installed
-or removed meanwhile shows up; the app switches to it only on **Look Again** or the next
-launch.
-
-### Calibrating from the app
-
-**Displays ▸ Calibrate…** opens a window that does the bezel measurement described below
-without the terminal. It lays the test pattern over every screen, on every Space, in front
-of every window but the menu bar — your wallpaper is never touched — with the controls above
-it. The judgement still happens by eye, across the bezel, so the controls stay small and out
-of the way. The pattern moves the moment you do; gap readouts follow a beat later.
-
-Two controls, because there are two ways to be wrong. **Arrow keys**, or **dragging** a
-screen, move the picture on it — diagonals breaking across the bezel mean the position is
-off. Clicking a screen selects it; the reference screen is held still, so drag the others.
-**Panel scale** (or **⌥↑ / ⌥↓**) changes a panel's density, in PPI — circles breaking while
-the diagonals line up mean the scale is off, and no amount of nudging fixes that.
-
-It pauses cycling while it is open and resumes when you close it — unless you had already
-paused it yourself, in which case it leaves it alone.
-
-## Running unattended
+### Running unattended
 
 ```sh
 wallspan config set --dir ~/Pictures/Backgrounds --interval 15m
 wallspan agent install
-wallspan agent status
 wallspan agent uninstall
 ```
 
-`agent install` sets it up as a login item, so it also re-applies your wallpaper each time
-you log in. It has to be a background agent rather than a cron job: setting the desktop
-picture requires a graphical login session, which cron does not have.
+Enable Cycling runs `agent install --binary` with the `wallspan` the app is using, while
+plain `agent install` copies the CLI into `~/.local/bin`.
 
-Settings live in `~/Library/Application Support/wallspan/config.json`, not in the agent's
-configuration, so retuning is just an edit:
+Settings live in `~/Library/Application Support/wallspan/config.json`, and a running agent
+picks up changes within seconds:
 
 ```json
 {
@@ -141,268 +139,108 @@ configuration, so retuning is just an edit:
 }
 ```
 
-`idleDeferSeconds` holds a scheduled change back until you have stopped typing for that
-long, so the cost below is paid while you are away from the keyboard rather than in the
-middle of a sentence. It gives up and goes ahead after half an interval, or five minutes,
-whichever is sooner. It governs only the scheduled change: arriving at a Space, rearranging
-displays, `wallspan next` and resuming all apply at once. `--idle-defer off` disables it,
-on `config set` or on `cycle` for one run.
+`idleDeferSeconds` holds a scheduled change until there's been no keyboard or mouse input
+for that many seconds, waiting at most half an interval or five minutes, whichever is
+shorter. `--idle-defer off` turns it off. Logs go to
+`~/Library/Logs/wallspan.log`.
 
-A running agent notices changes within a few seconds — `wallspan config set --interval
-30m` takes effect without a restart. Logs go to `~/Library/Logs/wallspan.log`.
-
-If the folder lives on an external or network volume that is not mounted yet at login,
-the agent waits and retries rather than giving up.
-
-## Bezel compensation
-
-Monitors have bezels. macOS places displays edge to edge and gives you no way to describe
-the gap, so content that should be hidden behind the bezels gets squeezed into view
-instead — and a spanned image looks subtly wrong even though it is technically correct.
-
-wallspan models each panel's active area in millimetres, so bezel gaps become real dead
-space: content there is rendered and discarded, which is what makes the picture read as
-continuous.
+### Calibrating from the command line
 
 ```sh
-wallspan calibrate                                  # apply a test pattern
-wallspan layout nudge dell --dx 20px --dy -4px      # adjust
-wallspan calibrate                                  # look again
+wallspan calibrate                                  # set the test pattern as wallpaper
+wallspan layout nudge dell --dx 20px --dy -4px
+wallspan layout size lg --ppi 109.6                 # or --width 797.22mm from the spec
 wallspan layout show
-wallspan layout reset                               # start over, edge to edge
+wallspan layout reset                               # back to edge to edge
+wallspan layout arrange [--dry-run | --revert]
+wallspan verify-mapping <image|directory>           # check the rendered output
+wallspan restore                                    # when you are done
 ```
 
-Calibrate by eye against the long diagonals in the test pattern. Your eye is extremely
-good at spotting a break in a straight line — far better than judging a gap width. If the
-diagonals step **down-right** across the seam, the gap is too small; **up-right** means too
-large. The red horizontal rules isolate purely vertical error, and the 10 mm grid is a
-scale reference you can check against a tape measure.
+Pause cycling first, or the next change replaces the pattern.
 
-The whole lattice is pinned to the centre of your main display, so the bullseye and the
-diagonal crossing on it stay put while you move the other panels around them.
+## How the app finds the CLI
 
-### Panel sizes, and why they need correcting
+The app has no wallpaper logic of its own. It runs whichever `wallspan` is on your `PATH`,
+and falls back to the copy in its bundle if that one is missing or speaks a contract
+version the app doesn't understand. The [JSON contract](docs/cli-json-contract.md)
+between them is versioned.
 
-macOS reports each panel's physical size from EDID, and monitors frequently report it
-wrong. One LG here claims 801.6 x 329.5 mm for a 3440x1440 panel - 109 PPI across but 111
-PPI down. No flat panel has non-square pixels, so at least one of those numbers is false.
-Left alone, a feature crossing the seam drifted 31 px.
+**About Wallspan…** shows which copy is in use and why.
+`defaults write net.serubin.wallspan.app PreferBundledCLI -bool true` pins it to the
+bundled one. **Install CLI…** symlinks the bundled CLI into `~/.local/bin` when no other
+`wallspan` is installed.
 
-wallspan corrects this without asking. The per-axis figures are untrustworthy but the
-*diagonal* survives - EDID's base block stores size in whole centimetres, which moves each
-axis by up to 5 mm while barely moving the diagonal - so it keeps the diagonal and imposes
-the pixel aspect ratio, giving the one square-pixel rectangle that fits. Across panels from
-14" to 49" that drives anisotropy to zero every time and roughly halves the mean error,
-and where the reported size was already square it changes nothing.
+## Checking for updates
 
-`wallspan layout show` says when it has corrected a panel, and what the panel claimed.
-
-What no amount of inference can find is a size wrong in *both* axes by the same
-proportion: that is a pure scale error and EDID looks entirely self-consistent. It shows up
-as circles that break across the seam while the diagonals line up. Dial it out by eye:
-
-```sh
-wallspan layout size lg --ppi 109.6      # or --scale 100.6
-wallspan layout size lg --width 797.22mm # if you have the spec sheet
-```
-
-### Aligning the displays
-
-System Settings only lets you *drag* display rectangles, which is too coarse to line up
-panels of different heights — and that arrangement is what decides where your cursor
-crosses between screens. `layout arrange` pushes the calibration into macOS with exact
-precision:
-
-```sh
-wallspan layout arrange
-wallspan layout arrange --dry-run
-wallspan layout arrange --revert
-```
-
-Vertical only: macOS requires displays to be contiguous, so a bezel gap cannot be
-expressed in the arrangement at all. Applied permanently, with your previous arrangement
-saved so `--revert` always works.
-
-Some residual misalignment is unavoidable when panels differ in density — macOS's
-coordinate space has no notion of physical size, so one point cannot mean the same
-distance on both screens. wallspan matches at the centre of the shared overlap to halve
-the worst case, and prints what remains.
-
-### Checking your calibration
-
-```sh
-wallspan verify-mapping <image|directory>   # exact check, valid at any bezel gap
-wallspan selftest                           # proves the geometry (needs 2+ displays)
-```
-
-`verify-mapping` works backwards from the rendered output: for each sampled pixel it
-computes which source pixel should be there, and compares. Real photographs come back at
-0–0.05% mismatch.
-
-## Build
-
-```sh
-swift build -c release
-./.build/release/wallspan info
-swift test                     # the menu bar app's unit tests (XCTest needs Xcode)
-```
-
-Needs only the Swift toolchain from Command Line Tools — no Xcode, and no signing
-certificate: `Scripts/make-app.sh` signs `Wallspan.app` ad-hoc.
-
-## Releases
-
-Every build says which channel it came from, so an installed copy can be traced back to a
-commit. `wallspan version` prints it.
-
-| channel | example | where it comes from | signed |
-|---|---|---|---|
-| `release` | `0.2.0` | a tagged release, on the [releases page](../../releases) | Developer ID, notarised |
-| `beta` | `0.2.0-beta.3`, `0.2.0-rc.1` | a prerelease on the releases page, and `wallspan@beta` in the tap | Developer ID, notarised |
-| `unsigned` | `0.2.0-unsigned.1` | a prerelease for testing the release workflow | ad-hoc |
-| `snapshot` | `0.2.1-snapshot.7+g1a2b3c4` | every merge to `main`, as a CI artifact | ad-hoc |
-| `dev` | `0.2.1-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact | ad-hoc |
-
-A snapshot or dev build counts as a prerelease of the next patch after the last stable
-release, or of a later version that already has a prerelease, so a snapshot sorts above
-the release and that version's betas and rcs, and a dev build above its betas.
-A plain `swift build` reports `0.0.0-local` and channel `local`.
-
-A release ships four assets: the CLI as a tarball, the same CLI as a bare binary, the
-`Wallspan.app` bundle, and `SHA256SUMS.txt` to check them with. The CLI and the app are
-signed with a Developer ID, use the hardened runtime, and are notarised by Apple, with the
-ticket stapled to the app, so a downloaded copy opens without clearing any quarantine
-attribute.
-A bare binary cannot carry a stapled ticket, though: the first time a downloaded CLI runs,
-macOS checks its notarisation with Apple, so that first run needs a network connection.
-Snapshot and dev builds are only ad-hoc signed, and Gatekeeper still blocks them once
-downloaded.
-
-Releases are cut by running the `release` workflow against a ref. It builds and verifies
-first, then leaves a draft for review; the git tag is created only when that draft is
-published. Signing happens in a separate job that waits for approval in the `release`
-environment, which holds the certificate and the notary key, and fails with the exact
-`gh secret set` command for anything missing.
-
-The version is chosen when the workflow is dispatched; nothing in the source names it.
-Give it `X.Y.Z` and a `kind`: `release` tags `X.Y.Z` itself, while `beta`, `rc` and
-`unsigned` add the next `-beta.N`, `-rc.N` or `-unsigned.N`, counting drafts.
-
-```sh
-gh workflow run release.yml -f version=1.1.0 -f kind=beta      # 1.1.0-beta.1, then .2, ...
-gh workflow run release.yml -f version=1.1.0 -f kind=release   # 1.1.0
-```
-
-It refuses a version that already exists or is not newer than the latest release, a beta
-once an `rc` of the same version exists, and anything past the next patch, minor or major
-unless that version already has a prerelease or `allow_jump` is set: once published, the
-tap never moves backwards, so a typo would strand it. A ref from before this scheme can
-only be released at the `baseVersion` in its own `Version.swift`; anything else fails in
-the build job.
-
-Betas are signed and notarised exactly like releases. To follow betas with Homebrew,
-install the beta cask instead of the stable one:
-
-```sh
-brew uninstall --cask wallspan
-brew install --cask serubin/tap/wallspan@beta
-```
-
-`wallspan@beta` moves to each new beta, and to each stable release that is newer than its
-latest beta, so it never falls behind the stable cask. There is no beta formula. Switching
-casks removes the LaunchAgent, so turn **Cycle in the Background** back on afterwards.
-Unsigned prereleases never reach the tap.
-
-### Checking for updates
-
-Nothing here phones home unless you ask it to. **Check for Updates Automatically** in the
-menu bar app is off until you turn it on, and **Check for Updates…** next to it works
-whether or not you have.
-
-When it does run, this is the whole of it: one unauthenticated `GET` of
+Off until you turn on **Check for Updates Automatically**, or choose **Check for
+Updates…**. A check is one unauthenticated request, and automatic ones run at most once a
+day:
 
 ```
 https://api.github.com/repos/Serubin/WallSpan/releases/latest
 ```
 
-and nothing else. The only fields read from the answer are `tag_name`, `draft` and
-`prerelease`. An install on the beta track — a beta build, or the `wallspan@beta` cask —
-asks for the newest ten releases instead, since `releases/latest` never returns a
-prerelease:
+Beta installs ask for `releases?per_page=10` instead, since `latest` skips prereleases.
+That does tell GitHub the install follows betas. Only `tag_name`, `draft` and
+`prerelease` are read. The request carries no identifier, no cookies, and a bare
+`User-Agent: Wallspan` and `Accept-Language: en`, so it doesn't leak your app version,
+macOS build or languages.
 
-```
-https://api.github.com/repos/Serubin/WallSpan/releases?per_page=10
-```
-
-and reads the same three fields from each. Which of the two URLs is asked for does tell
-GitHub whether this install follows betas. The request carries no identifier, no version, no
-install count and no beacon — just `Accept`, a bare `User-Agent: Wallspan` and
-`Accept-Language: en`. Those last two are pinned deliberately: left alone, the defaults
-would report the app version, your exact macOS build, and the language list you have
-configured. No `If-None-Match`, so there is no per-install token to echo back either, and no
-cookies are stored or sent.
-
-Automatic checks happen at most once a day, and the time of the last successful one is
-remembered so relaunching in a loop does not repeat it. Nothing is downloaded and nothing
-updates itself: the result is a menu entry — the release page, or the `brew upgrade`
-command when Homebrew owns the copy that is behind. The tag last seen is remembered, so
-that entry survives a relaunch without asking GitHub again.
-
-The app compares the release against both halves — the `wallspan` it resolved and its own
-bundle — and reports whichever is behind. It never offers a downgrade, and a `snapshot` or
-`dev` build is never nudged toward an older `release`. If Homebrew installed the stale half
-you are given `brew upgrade` rather than a zip Homebrew would overwrite on its next run.
-The beta track is offered newer betas as well as the next release; everything else is
-offered releases only. A beta is never offered through the stable cask or the formula,
-which cannot install one, so those halves get the release page instead.
-
-A failed automatic check says nothing at all — offline, rate limited and captive-portalled
-are not worth an alert. A failed *manual* check tells you why, because you asked.
+Nothing downloads or updates itself. You get a menu entry pointing at the release page,
+or at `brew upgrade` if Homebrew installed it. A failed automatic check stays silent.
 
 ## Known limits
 
-- **Per-Space wallpaper.** macOS keeps a separate wallpaper per Space, and setting one only
-  affects the Space you are currently on. `cycle` works around this by applying the current
-  image to each Space on arrival — but a one-shot `wallspan apply` exits and cannot, so it
-  reaches only the Space you ran it from.
+- **Per-Space wallpaper.** macOS keeps a wallpaper per Space. Cycling applies the image to
+  each Space as you arrive, but a one-shot `wallspan apply` only reaches the current one.
+  Setting a wallpaper costs macOS about 2.4s of CPU whatever the image, so cycling skips
+  Spaces that already have it.
+- **One `cycle` at a time.** A second one exits and names the pid holding the lock.
+- **The render cache never evicts.** It lives in
+  `~/Library/Application Support/wallspan/rendered` and is safe to delete.
+- **Some of the image is discarded.** Anything behind a bezel, or above and below a shorter
+  screen, isn't shown - roughly a third of the source with an ultrawide beside a portrait
+  panel. `wallspan layout show` prints the figure.
+- An image that already matches one display exactly still gets scaled and cropped, since
+  it's mapped across the whole arrangement.
 
-  Setting a wallpaper costs macOS about 2.4s of CPU across `WallpaperAgent` and
-  `WallpaperImageExtension`, whatever the image, and it is not skipped when the wallpaper is
-  already the one being set. So `cycle` tracks which Spaces already hold the current image
-  and leaves those alone; without that, swiping between Spaces pins a couple of cores for as
-  long as you keep swiping. Identifying the front Space needs a private framework, and where
-  that is unavailable `cycle` says so at startup and falls back to re-applying every time.
-  Entries are re-asserted at least once per interval, so a Space that something else changed
-  behind our back catches up rather than staying wrong. Where that memory has been thrown
-  away wholesale — after a wake, a display change, or a user switch — the desktop is read
-  back first, which is about a thousand times cheaper than setting it again blind.
+## Build
 
-  Almost all of that cost is macOS resolving security-scoped bookmarks, and none of it is
-  the image: format, byte size, pixel count and file location make no measurable difference,
-  and neither does re-using a path you have already set. Not making the call is the only
-  saving available, which is what the Space memory and `idleDeferSeconds` are both for.
-- **Only one `cycle` runs at a time.** A second one exits immediately naming the pid that
-  holds the lock, rather than fighting over the wallpaper and the saved playlist position.
-- **The render cache never evicts.** Every image-and-arrangement pair keeps full-size PNGs
-  under `~/Library/Application Support/wallspan/rendered`, and rearranging displays
-  re-renders under a new key. Safe to `rm -rf` at any time.
-- **Strict union mapping discards image.** Content that falls outside any panel — behind
-  bezels, or above and below a shorter screen — is not shown. With an ultrawide beside a
-  portrait panel that can be roughly a third of the source. `wallspan layout show` prints
-  the figure.
-- An image that already matches one display exactly gets scaled and cropped anyway, since
-  it is mapped across the whole arrangement.
+```sh
+swift build -c release
+Scripts/make-app.sh            # builds dist/Wallspan.app
+swift test
+```
+
+Needs only the Command Line Tools Swift toolchain and no signing certificate. `swift test`
+needs Xcode.
+
+## Releases
+
+`wallspan version` prints which channel a build came from:
+
+| channel | example | from | signed |
+|---|---|---|---|
+| `release` | `0.2.0` | the [releases page](../../releases) | Developer ID, notarised |
+| `beta` | `0.2.0-beta.3`, `0.2.0-rc.1` | a prerelease, and `wallspan@beta` | Developer ID, notarised |
+| `unsigned` | `0.2.0-unsigned.1` | a test of the release workflow | ad-hoc |
+| `snapshot` | `0.2.1-snapshot.7+g1a2b3c4` | each merge to `main`, as a CI artifact | ad-hoc |
+| `dev` | `0.2.1-dev.pr42+g1a2b3c4` | a pull request, as a CI artifact | ad-hoc |
+
+Each release ships the app, the CLI as a tarball and a bare binary, and `SHA256SUMS.txt`.
+The first run of a downloaded CLI needs a network connection, so macOS can check its
+notarisation. Ad-hoc builds are blocked by Gatekeeper once downloaded.
+
+Cutting a release is covered in [docs/releasing.md](docs/releasing.md).
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-Copyleft, deliberately: anyone may use, modify or sell this, but anyone who distributes it
-must make the full source available under the same terms. It cannot be turned into a
-closed paid product — which is exactly what happened to the tools it replaces.
-
-No code was taken from any existing product. wallspan is written from scratch against
-public AppKit APIs.
+GPL so it can't become a closed paid product like the tools it replaces: anyone who
+distributes it must share the full source under the same terms. It's written
+from scratch against public AppKit APIs, with no code taken from any existing product.
 
 ## Acknowledgement
 
