@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Solomon <serubin@serubin.net>
 
-// Overwritten in place by `Scripts/version.sh --stamp`; the values below are what an
-// unstamped working tree reports. Checked in rather than generated so that a bare
-// `swift build` still compiles — hand-edit `baseVersion` in Version.swift, not this file.
+// Rewritten in place by `Scripts/version.sh --stamp`, never by hand; checked in with an
+// unstamped tree's values so that a bare `swift build` still compiles.
 extension Wallspan {
-    /// Empty in a working tree, so `version` falls back to `baseVersion`.
+    /// Empty in a working tree, so `version` falls back to `fallbackVersion`.
     static let stampedVersion = ""
 
     /// How this build was produced: `release`, `beta`, `unsigned`, `snapshot`, `dev`, or

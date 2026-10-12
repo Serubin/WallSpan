@@ -4,20 +4,18 @@
 /// What this build calls itself. Reported by `wallspan version`, shown in the menu bar
 /// app's About box, and carried in the `--json` contract.
 ///
-/// Only `baseVersion` is hand-edited. Everything else comes from `BuildInfo.swift`, which
-/// `Scripts/version.sh --stamp` rewrites in CI — so a release binary, a snapshot of main
-/// and a PR build are told apart by the binary itself rather than by the filename it
-/// happened to arrive in.
+/// It all comes from `BuildInfo.swift`, which `Scripts/version.sh --stamp` rewrites in CI —
+/// so a release binary, a snapshot of main and a PR build are told apart by the binary
+/// itself rather than by the filename it happened to arrive in.
 public enum Wallspan {
-    /// The release this tree is working toward, bumped by hand right after a release and
-    /// left alone through its betas. The release workflow refuses to tag a version that
-    /// disagrees with it, which is what stops the bump being forgotten.
-    public static let baseVersion = "1.0.0"
+    /// What an unstamped working tree reports. Release versions are chosen when the release
+    /// workflow is dispatched, never written into the source.
+    public static let fallbackVersion = "0.0.0-local"
 
     /// The full version: `-beta.N`, `-rc.N` or `-unsigned.N` for a prerelease, and the
-    /// channel and commit for a snapshot or dev build. Falls back to `baseVersion` in an
+    /// channel and commit for a snapshot or dev build. Falls back to `fallbackVersion` in an
     /// unstamped working tree.
     public static var version: String {
-        stampedVersion.isEmpty ? baseVersion : stampedVersion
+        stampedVersion.isEmpty ? fallbackVersion : stampedVersion
     }
 }
