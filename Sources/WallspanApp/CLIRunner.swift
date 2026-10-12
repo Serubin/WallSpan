@@ -42,21 +42,57 @@ struct CLIRunner {
         // the caller is about to parse.
         process.standardError = FileHandle.nullDevice
 
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
+        // Drained while the child runs: one that fills the 64 KB pipe buffer would otherwise
+        // block writing while we block waiting.
+        let collected = Collected()
+        let reader = out.fileHandleForReading
+        reader.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                collected.finish()
+            } else {
+                collected.append(chunk)
+            }
+        }
+
         do { try process.run() } catch {
+            reader.readabilityHandler = nil
             throw RunError.launchFailed(error.localizedDescription)
         }
 
-        // Read before waiting. A child that fills the 64 KB pipe buffer blocks writing while
-        // the parent blocks waiting, and neither ever moves.
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning, Date() < deadline { usleep(20_000) }
-        if process.isRunning {
+        // Never close `reader` here: a handler mid-read on another queue would raise EBADF.
+        guard exited.wait(timeout: .now() + timeout) == .success else {
+            reader.readabilityHandler = nil
             process.terminate()
+            // The child leads its own process group; take down whatever ignored SIGTERM.
+            if exited.wait(timeout: .now() + 0.5) == .timedOut {
+                kill(-process.processIdentifier, SIGKILL)
+            }
             throw RunError.timedOut
         }
-        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+        // The child's own output is already in the pipe; a grandchild that inherited stdout,
+        // such as a daemon started from a shell rc file, can hold it open long after.
+        if !collected.waitForEOF(until: .now() + 0.5) {
+            reader.readabilityHandler = nil
+        }
+        return (process.terminationStatus, String(decoding: collected.data, as: UTF8.self))
+    }
+
+    private final class Collected: @unchecked Sendable {
+        private let eof = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var buffer = Data()
+
+        var data: Data { lock.withLock { buffer } }
+        func append(_ chunk: Data) { lock.withLock { buffer.append(chunk) } }
+        func finish() { eof.signal() }
+        func waitForEOF(until deadline: DispatchTime) -> Bool {
+            eof.wait(timeout: deadline) == .success
+        }
     }
 
     /// A `Contract.Failure` is thrown as-is, so callers can branch on its stable `code`. No
