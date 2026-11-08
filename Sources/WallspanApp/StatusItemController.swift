@@ -33,6 +33,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let calibration = CalibrationWindowController()
     private let about = AboutWindowController()
     private let updates = UpdateChecker()
+    private let usage = UsagePing()
     /// `resolveBinary` runs again for "Look Again", which must not re-arm the check.
     private var didArmUpdateChecks = false
     private var updateTimer: Timer?
@@ -112,6 +113,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 self?.updateAbout()
                 self?.refresh()
                 self?.armUpdateChecks()
+                self?.usage.start()
                 self?.detectInstalled(force: true)
             }
         }
@@ -837,6 +839,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             + "most once a day. Nothing is sent about you or this machine."
         menu.addItem(automatic)
 
+        let ping = item("Send Daily Usage Ping", #selector(toggleUsagePing))
+        ping.state = usage.enabled ? .on : .off
+        ping.toolTip = "Counts this copy as one user for the day, once a day. "
+            + "Sends the app version and no identifier. See the README."
+        menu.addItem(ping)
+
         menu.addItem(.separator())
     }
 
@@ -874,6 +882,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // An explicit yes deserves an answer now — but through the gated path, so it does
         // not make a second request if a check already succeeded today.
         if updates.automatic { checkForUpdatesQuietly() }
+    }
+
+    @objc private func toggleUsagePing() {
+        usage.enabled.toggle()
+        rebuild()
     }
 
     @objc private func openUpdate() {

@@ -10,9 +10,9 @@
 A replacement for aging paid alternatives for applying multi monitor spanning wallpapers.
 
 A menu bar app, and the command line tool underneath it. macOS 14 or later. No
-dependencies, no telemetry, no subscription. The CLI never touches the network. The app
-only does so to [check for updates](#checking-for-updates) when you ask, or automatically
-if you turn that on.
+dependencies, no subscription. The CLI never touches the network. The app only does so to
+[check for updates](#checking-for-updates) when you ask or turn that on, and to send a
+[daily usage ping](#daily-usage-ping), which is on by default and has an off switch.
 
 ## What it does
 
@@ -189,6 +189,31 @@ macOS build or languages.
 
 Nothing downloads or updates itself. You get a menu entry pointing at the release page,
 or at `brew upgrade` if Homebrew installed it. A failed automatic check stays silent.
+
+## Daily usage ping
+
+The menu bar app tells the project's own Plausible server that it was running today. It
+exists to answer whether anyone uses this, and it is the only thing sent without you asking.
+Turn off **Send Daily Usage Ping** in the menu to stop it. The first launch sends nothing, so
+you have until the next day to do that.
+
+It is one `POST` a local day to `https://analytics.serubin.net/api/event`, with the same
+body from every install of a version. A failed one retries hourly, so a response lost on its
+way back can count you twice:
+
+```json
+{"name":"pageview","url":"app://wallspan/1.0.0","domain":"wallspan.serubin.net"}
+```
+
+The app version is the only thing that varies, and following a beta or rc does put you in a
+smaller group. There is no identifier and no cookies, and `User-Agent` and `Accept-Language`
+are pinned to `Wallspan` and `en`. The date of the last ping stays on your Mac. As with any
+web request, the server sees your IP address. Plausible uses it to derive a country and a
+visitor hash salted with a key it deletes daily, and doesn't store the address itself.
+
+The CLI sends nothing, so only people running the app are counted. Only release, beta and
+rc builds signed with the project's Developer ID send it, so unsigned releases, hand builds
+and forks send nothing.
 
 ## Known limits
 
